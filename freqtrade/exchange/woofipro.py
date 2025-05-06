@@ -6,6 +6,7 @@ from freqtrade.exchange import Exchange
 
 from deps.freqtrade.freqtrade.enums.marginmode import MarginMode
 from deps.freqtrade.freqtrade.enums.tradingmode import TradingMode
+from freqtrade.exchange.exchange_types import FtHas
 
 logger = logging.getLogger(__name__)
 
@@ -26,3 +27,14 @@ class Woofipro(Exchange):
         # (TradingMode.FUTURES, MarginMode.CROSS),
         (TradingMode.FUTURES, MarginMode.ISOLATED),
     ]
+
+    _ft_has: FtHas = {
+        # TODO: Confirm correct parameters from Orderly
+        "mark_ohlcv_timeframe": "1d",
+        # TODO: Confirm correct parameters from Orderly
+        "funding_fee_timeframe": "1d",
+        # "stoploss_order_types": {"limit": "limit"},
+        # "stoploss_on_exchange": True,
+        # "trades_has_history": False,  # Endpoint doesn't have a "since" parameter
+        # "ws_enabled": True,
+    }
