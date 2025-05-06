@@ -1,14 +1,14 @@
 """WOOFi Pro exchange subclass"""
 
 import logging
-from pathlib import Path
+
 
 from freqtrade.exchange import Exchange
 
-from deps.freqtrade.freqtrade.enums.marginmode import MarginMode
-from deps.freqtrade.freqtrade.enums.tradingmode import TradingMode
+from freqtrade.enums.marginmode import MarginMode
+from freqtrade.enums.tradingmode import TradingMode
 from freqtrade.exchange.exchange_types import FtHas
-from freqtrade.misc import json_load
+
 
 logger = logging.getLogger(__name__)
 
