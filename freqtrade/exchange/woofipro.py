@@ -81,7 +81,7 @@ class Woofipro(Exchange):
             data = spoofed_data.copy()
             data["symbol"] = pair
             self._leverage_tiers[pair] = [
-                data
+                self.parse_leverage_tier(data)
             ]
 
 
