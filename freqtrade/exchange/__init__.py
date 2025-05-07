@@ -45,3 +45,5 @@ from freqtrade.exchange.kucoin import Kucoin
 from freqtrade.exchange.lbank import Lbank
 from freqtrade.exchange.okx import Okx
 from freqtrade.exchange.woofipro import Woofipro
+from freqtrade.exchange.grvt import Grvt
+

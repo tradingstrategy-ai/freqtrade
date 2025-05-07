@@ -35,6 +35,10 @@ CcxtModuleType = Any
 
 
 def is_exchange_known_ccxt(exchange_name: str, ccxt_module: CcxtModuleType | None = None) -> bool:
+
+    if exchange_name == "grvt":
+        return True
+
     return exchange_name in ccxt_exchanges(ccxt_module)
 
 
@@ -58,13 +62,21 @@ def validate_exchange(exchange: str) -> tuple[bool, str, ccxt.Exchange | None]:
     returns: can_use, reason, exchange_object
         with Reason including both missing and missing_opt
     """
-    try:
-        ex_mod = getattr(ccxt.pro, exchange.lower())()
-    except AttributeError:
-        ex_mod = getattr(ccxt.async_support, exchange.lower())()
 
-    if not ex_mod or not ex_mod.has:
-        return False, "", None
+    if exchange.lower() != "grvt":
+
+        try:
+            ex_mod = getattr(ccxt.pro, exchange.lower())()
+        except AttributeError:
+            ex_mod = getattr(ccxt.async_support, exchange.lower())()
+
+        if not ex_mod or not ex_mod.has:
+            return False, "", None
+
+    else:
+        from pysdk.grvt_ccxt import GrvtCcxt
+        from pysdk.grvt_ccxt_env import GrvtEnv
+        ex_mod = GrvtCcxt(env=GrvtEnv.PROD)
 
     result = True
     reason = ""
