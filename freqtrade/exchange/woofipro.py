@@ -1,13 +1,20 @@
 """WOOFi Pro exchange subclass"""
 
 import logging
+from copy import deepcopy
+from decimal import Decimal
 
-
-from freqtrade.exchange import Exchange
-
+import ccxt
 from freqtrade.enums.marginmode import MarginMode
 from freqtrade.enums.tradingmode import TradingMode
-from freqtrade.exchange.exchange_types import FtHas
+from freqtrade.exchange import Exchange
+from freqtrade.exchange.exchange_types import CcxtBalances, FtHas
+from freqtrade.exchange.common import retrier
+from freqtrade.exceptions import (
+    DDosProtection,
+    OperationalException,
+    TemporaryError,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -51,16 +58,16 @@ class Woofipro(Exchange):
 
         # Spoofed data
         spoofed_data = {
-            "tier": 1.0,
+            "tier": 1,
             "symbol": "1000000MOG/USDT:USDT",
             "currency": "USDT",
             "minNotional": 0.0,
             "maxNotional": 5000.0,
             "maintenanceMarginRate": 0.01,
-            "maxLeverage": 25.0,
+            "maxLeverage": 10,
             "info": {
                 "bracket": "1",
-                "initialLeverage": "25",
+                "initialLeverage": "1",
                 "notionalCap": "5000",
                 "notionalFloor": "0",
                 "maintMarginRatio": "0.01",
@@ -84,11 +91,62 @@ class Woofipro(Exchange):
             ]
 
     def validate_ordertypes(self, order_types: dict) -> None:
-        # drop the market order check since ccxt config is wrong
+        """
+        Override the default validate_ordertypes to remove the market order check
+        since ccxt config is wrong
+        """
         # if any(v == "market" for k, v in order_types.items()):
         #     if not self.exchange_has("createMarketOrder"):
         #         raise ConfigurationError(f"Exchange {self.name} does not support market orders.")
         self.validate_stop_ordertypes(order_types)
+
+    @retrier
+    def get_balances(self) -> CcxtBalances:
+        """
+        Override the default get_balances to add values for "free" and "used"
+        """
+        balances = super().get_balances()
+        new_balances = deepcopy(balances)
+        for token, balance in balances.items():
+            if balance["free"] is None:
+                new_balances[token]["frozen"] = float(balance["frozen"])
+                new_balances[token]["free"] = float(Decimal(balance["total"]) - Decimal(balance["frozen"]))
+                new_balances[token]["used"] = float(balance["frozen"])
+        return new_balances
+    
+    @retrier
+    def _set_leverage(
+        self,
+        leverage: float,
+        pair: str | None = None,
+        accept_fail: bool = False,
+    ):
+        """
+        Override the default set_leverage to use integer leverage
+        """
+        if self._config["dry_run"] or not self.exchange_has("setLeverage"):
+            # Some exchanges only support one margin_mode type
+            return
+        
+        # Orderly requires integer leverage
+        leverage = int(leverage)
+
+        try:
+            res = self._api.set_leverage(symbol=pair, leverage=leverage)
+            self._log_exchange_response("set_leverage", res)
+        except ccxt.DDoSProtection as e:
+            raise DDosProtection(e) from e
+        except (ccxt.BadRequest, ccxt.OperationRejected, ccxt.InsufficientFunds) as e:
+            if not accept_fail:
+                raise TemporaryError(
+                    f"Could not set leverage due to {e.__class__.__name__}. Message: {e}"
+                ) from e
+        except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
+            raise TemporaryError(
+                f"Could not set leverage due to {e.__class__.__name__}. Message: {e}"
+            ) from e
+        except ccxt.BaseError as e:
+            raise OperationalException(e) from e
 
 
 _DUMMY_PAIRS = [
