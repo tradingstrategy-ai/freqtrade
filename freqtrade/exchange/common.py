@@ -66,7 +66,8 @@ SUPPORTED_EXCHANGES = [
     "kraken",
     "okx",
     "woofipro",
-    "grvt"
+    "grvt",
+    "modetrade",
 ]
 
 # either the main, or replacement methods (array) is required
