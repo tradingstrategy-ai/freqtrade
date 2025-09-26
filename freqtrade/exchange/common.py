@@ -53,6 +53,8 @@ MAP_EXCHANGE_CHILDCLASS = {
     "myokx": "okx",
     "gateio": "gate",
     "huboi": "htx",
+    "asterus": "aster",  # if you want to support asterus as an alias
+    "asterdex": "aster",
 }
 
 SUPPORTED_EXCHANGES = [
@@ -65,6 +67,7 @@ SUPPORTED_EXCHANGES = [
     "hyperliquid",
     "kraken",
     "okx",
+    "aster",
 ]
 
 # either the main, or replacement methods (array) is required

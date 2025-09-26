@@ -51,7 +51,7 @@ from tests.conftest import (
 
 
 # Make sure to always keep one exchange here which is NOT subclassed!!
-EXCHANGES = ["binance", "kraken", "gate", "kucoin", "bybit", "okx"]
+EXCHANGES = ["binance", "kraken", "gate", "kucoin", "bybit", "okx", "aster"]
 
 get_entry_rate_data = [
     ("other", 20, 19, 10, 0.0, 20),  # Full ask side

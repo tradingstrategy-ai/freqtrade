@@ -499,6 +499,22 @@ EXCHANGES = {
         "leverage_tiers_public": False,
         "leverage_in_spot_market": False,
     },
+    "aster": {
+        "pair": "BTC/USDT",  # or appropriate pair for Aster
+        "stake_currency": "USDT",
+        "use_ci_proxy": True,
+        "hasQuoteVolume": True,
+        "timeframe": "1h",
+        "candle_count": 1000,
+        "futures": True,  # if Aster supports futures
+        "futures_pair": "BTC/USDT:USDT",
+        "hasQuoteVolumeFutures": True,
+        "leverage_tiers_public": False,
+        "leverage_in_spot_market": False,
+        "trades_lookback_hours": 4,
+        "private_methods": [],  # Add Aster-specific methods if any
+        "sample_order": {},  # Add sample order structure
+    },
 }
 
 
