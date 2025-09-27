@@ -394,6 +394,7 @@ class IDataHandler(ABC):
         if startup_candles > 0 and timerange_startup:
             timerange_startup.subtract_start(timeframe_to_seconds(timeframe) * startup_candles)
 
+        # import ipdb ; ipdb.set_trace()
         pairdf = self._ohlcv_load(
             pair, timeframe, timerange=timerange_startup, candle_type=candle_type
         )
@@ -404,6 +405,7 @@ class IDataHandler(ABC):
 
             if timerange_startup:
                 self._validate_pairdata(pair, pairdf, timeframe, candle_type, timerange_startup)
+                # import ipdb ; ipdb.set_trace()
                 pairdf = trim_dataframe(pairdf, timerange_startup)
                 if self._check_empty_df(pairdf, pair, timeframe, candle_type, warn_no_data, True):
                     return pairdf
