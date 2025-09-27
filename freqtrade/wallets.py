@@ -405,7 +405,7 @@ class Wallets:
 
         if min_stake_amount is not None and min_stake_amount > max_allowed_stake:
             self._local_log(
-                "Minimum stake amount > available balance. "
+                f"{pair}: Minimum stake amount > available balance. "
                 f"{min_stake_amount} > {max_allowed_stake}",
                 level="warning",
             )

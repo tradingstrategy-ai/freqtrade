@@ -873,6 +873,8 @@ class Exchange:
         if trading_mode != TradingMode.SPOT and (
             (trading_mode, margin_mode) not in self._supported_trading_mode_margin_pairs
         ):
+            # <TradingMode.FUTURES: 'futures'>
+            # cross
             mm_value = margin_mode and margin_mode.value
             raise OperationalException(
                 f"Freqtrade does not support {mm_value} {trading_mode} on {self.name}"
@@ -905,10 +907,12 @@ class Exchange:
         e.g. spot.fetchOHLCV.limit
              swap.linear.fetchOHLCV.limit
         """
+        # import ipdb ; ipdb.set_trace()
+        swap_features = self._api_async.features.get("swap", {}) or {}
         feat = (
             self._api_async.features.get("spot", {})
             if market_type == "spot"
-            else self._api_async.features.get("swap", {}).get("linear", {})
+            else swap_features.get("linear", {})
         )
 
         return feat.get(endpoint, {}).get(attribute, default)
@@ -3210,6 +3214,7 @@ class Exchange:
     @retrier_async
     async def get_market_leverage_tiers(self, symbol: str) -> tuple[str, list[dict]]:
         """Leverage tiers per symbol"""
+        # import ipdb ; ipdb.set_trace()
         try:
             tier = await self._api_async.fetch_market_leverage_tiers(symbol)
             return symbol, tier
@@ -3480,6 +3485,7 @@ class Exchange:
         if params is None:
             params = {}
         try:
+            logger.warning("Setting margin mode to %s for %s", margin_mode, pair)
             res = self._api.set_margin_mode(margin_mode.value, pair, params)
             self._log_exchange_response("set_margin_mode", res)
         except ccxt.DDoSProtection as e:

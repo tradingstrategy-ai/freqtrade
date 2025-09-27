@@ -104,7 +104,11 @@ class FreqtradeBot(LoggingMixin):
             self.config, exchange_config=exchange_config, load_leverage_tiers=True
         )
 
-        init_db(self.config["db_url"])
+        try:
+            init_db(self.config["db_url"])
+        except Exception as e:
+            logger.error(f"Error initializing database: {self.config['db_url']}: {e}")
+            raise
 
         self.wallets = Wallets(self.config, self.exchange)
 
