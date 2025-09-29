@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 from zipfile import ZipFile
@@ -75,7 +75,7 @@ def test_get_latest_hyperopt_file(testdatadir):
     # Test with absolute path
     with pytest.raises(
         OperationalException,
-        match="--hyperopt-filename expects only the filename, not an absolute path.",
+        match=r"--hyperopt-filename expects only the filename, not an absolute path\.",
     ):
         get_latest_hyperopt_file(str(testdatadir.parent), str(testdatadir.parent))
 
@@ -182,19 +182,19 @@ def test_extract_trades_of_period(testdatadir):
             "profit_abs": [0.0, 1, -2, -5],
             "open_date": to_datetime(
                 [
-                    datetime(2017, 11, 13, 15, 40, 0, tzinfo=timezone.utc),
-                    datetime(2017, 11, 14, 9, 41, 0, tzinfo=timezone.utc),
-                    datetime(2017, 11, 14, 14, 20, 0, tzinfo=timezone.utc),
-                    datetime(2017, 11, 15, 3, 40, 0, tzinfo=timezone.utc),
+                    datetime(2017, 11, 13, 15, 40, 0, tzinfo=UTC),
+                    datetime(2017, 11, 14, 9, 41, 0, tzinfo=UTC),
+                    datetime(2017, 11, 14, 14, 20, 0, tzinfo=UTC),
+                    datetime(2017, 11, 15, 3, 40, 0, tzinfo=UTC),
                 ],
                 utc=True,
             ),
             "close_date": to_datetime(
                 [
-                    datetime(2017, 11, 13, 16, 40, 0, tzinfo=timezone.utc),
-                    datetime(2017, 11, 14, 10, 41, 0, tzinfo=timezone.utc),
-                    datetime(2017, 11, 14, 15, 25, 0, tzinfo=timezone.utc),
-                    datetime(2017, 11, 15, 3, 55, 0, tzinfo=timezone.utc),
+                    datetime(2017, 11, 13, 16, 40, 0, tzinfo=UTC),
+                    datetime(2017, 11, 14, 10, 41, 0, tzinfo=UTC),
+                    datetime(2017, 11, 14, 15, 25, 0, tzinfo=UTC),
+                    datetime(2017, 11, 15, 3, 55, 0, tzinfo=UTC),
                 ],
                 utc=True,
             ),
@@ -203,10 +203,10 @@ def test_extract_trades_of_period(testdatadir):
     trades1 = extract_trades_of_period(data, trades)
     # First and last trade are dropped as they are out of range
     assert len(trades1) == 2
-    assert trades1.iloc[0].open_date == datetime(2017, 11, 14, 9, 41, 0, tzinfo=timezone.utc)
-    assert trades1.iloc[0].close_date == datetime(2017, 11, 14, 10, 41, 0, tzinfo=timezone.utc)
-    assert trades1.iloc[-1].open_date == datetime(2017, 11, 14, 14, 20, 0, tzinfo=timezone.utc)
-    assert trades1.iloc[-1].close_date == datetime(2017, 11, 14, 15, 25, 0, tzinfo=timezone.utc)
+    assert trades1.iloc[0].open_date == datetime(2017, 11, 14, 9, 41, 0, tzinfo=UTC)
+    assert trades1.iloc[0].close_date == datetime(2017, 11, 14, 10, 41, 0, tzinfo=UTC)
+    assert trades1.iloc[-1].open_date == datetime(2017, 11, 14, 14, 20, 0, tzinfo=UTC)
+    assert trades1.iloc[-1].close_date == datetime(2017, 11, 14, 15, 25, 0, tzinfo=UTC)
 
 
 def test_analyze_trade_parallelism(testdatadir):
@@ -293,7 +293,7 @@ def test_combined_dataframes_with_rel_mean(testdatadir):
     pairs = ["ETH/BTC", "ADA/BTC"]
     data = load_data(datadir=testdatadir, pairs=pairs, timeframe="5m")
     df = combined_dataframes_with_rel_mean(
-        data, datetime(2018, 1, 12, tzinfo=timezone.utc), datetime(2018, 1, 28, tzinfo=timezone.utc)
+        data, datetime(2018, 1, 12, tzinfo=UTC), datetime(2018, 1, 28, tzinfo=UTC)
     )
     assert isinstance(df, DataFrame)
     assert "ETH/BTC" not in df.columns
@@ -344,7 +344,7 @@ def test_create_cum_profit1(testdatadir):
     assert cum_profits.iloc[0]["cum_profits"] == 0
     assert pytest.approx(cum_profits.iloc[-1]["cum_profits"]) == 9.0225563e-05
 
-    with pytest.raises(ValueError, match="Trade dataframe empty."):
+    with pytest.raises(ValueError, match=r"Trade dataframe empty\."):
         create_cum_profit(
             df.set_index("date"),
             bt_data[bt_data["pair"] == "NOTAPAIR"],
@@ -369,10 +369,10 @@ def test_calculate_max_drawdown(testdatadir):
     underwater = calculate_underwater(bt_data)
     assert isinstance(underwater, DataFrame)
 
-    with pytest.raises(ValueError, match="Trade dataframe empty."):
+    with pytest.raises(ValueError, match=r"Trade dataframe empty\."):
         calculate_max_drawdown(DataFrame())
 
-    with pytest.raises(ValueError, match="Trade dataframe empty."):
+    with pytest.raises(ValueError, match=r"Trade dataframe empty\."):
         calculate_underwater(DataFrame())
 
 
@@ -391,7 +391,7 @@ def test_calculate_csum(testdatadir):
     assert csum_min1 == csum_min + 5
     assert csum_max1 == csum_max + 5
 
-    with pytest.raises(ValueError, match="Trade dataframe empty."):
+    with pytest.raises(ValueError, match=r"Trade dataframe empty\."):
         csum_min, csum_max = calculate_csum(DataFrame())
 
 
@@ -596,7 +596,7 @@ def test_calculate_max_drawdown_abs(profits, relative, highd, lowdays, result, r
     [1000, 500,  1000, 11000, 10000] # absolute results
     [1000, 50%,  0%,   0%,       ~9%]   # Relative drawdowns
     """
-    init_date = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    init_date = datetime(2020, 1, 1, tzinfo=UTC)
     dates = [init_date + timedelta(days=i) for i in range(len(profits))]
     df = DataFrame(zip(profits, dates, strict=False), columns=["profit_abs", "open_date"])
     # sort by profit and reset index

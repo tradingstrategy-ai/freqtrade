@@ -3,7 +3,7 @@
 import random
 from collections import defaultdict
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, PropertyMock
 
@@ -22,11 +22,12 @@ from freqtrade.data.history import get_timerange
 from freqtrade.enums import CandleType, ExitType, RunMode
 from freqtrade.exceptions import DependencyException, OperationalException
 from freqtrade.exchange import timeframe_to_next_date, timeframe_to_prev_date
+from freqtrade.exchange.exchange_utils import DECIMAL_PLACES, TICK_SIZE
 from freqtrade.optimize.backtest_caching import get_backtest_metadata_filename, get_strategy_run_id
 from freqtrade.optimize.backtesting import Backtesting
 from freqtrade.persistence import LocalTrade, Trade
 from freqtrade.resolvers import StrategyResolver
-from freqtrade.util.datetime_helpers import dt_utc
+from freqtrade.util import dt_now, dt_utc
 from tests.conftest import (
     CURRENT_TEST_STRATEGY,
     EXMS,
@@ -348,6 +349,29 @@ def test_data_to_dataframe_bt(default_conf, mocker, testdatadir) -> None:
     assert processed["UNITTEST/BTC"].equals(processed2["UNITTEST/BTC"])
 
 
+def test_get_pair_precision_bt(default_conf, mocker) -> None:
+    patch_exchange(mocker)
+    default_conf["timeframe"] = "30m"
+    backtesting = Backtesting(default_conf)
+    backtesting._set_strategy(backtesting.strategylist[0])
+    pair = "UNITTEST/BTC"
+    backtesting.pairlists._whitelist = [pair]
+    ex_mock = mocker.patch(f"{EXMS}.get_precision_price", return_value=1e-5)
+    data, _timerange = backtesting.load_bt_data()
+    assert data
+
+    assert backtesting.get_pair_precision(pair, dt_utc(2018, 1, 1)) == (1e-8, TICK_SIZE)
+    assert ex_mock.call_count == 0
+    assert backtesting.get_pair_precision(pair, dt_utc(2017, 12, 15)) == (1e-8, TICK_SIZE)
+    assert ex_mock.call_count == 0
+
+    # Fallback to exchange logic
+    assert backtesting.get_pair_precision(pair, dt_utc(2017, 1, 15)) == (1e-5, DECIMAL_PLACES)
+    assert ex_mock.call_count == 1
+    assert backtesting.get_pair_precision("ETH/BTC", dt_utc(2017, 1, 15)) == (1e-5, DECIMAL_PLACES)
+    assert ex_mock.call_count == 2
+
+
 def test_backtest_abort(default_conf, mocker, testdatadir) -> None:
     patch_exchange(mocker)
     backtesting = Backtesting(default_conf)
@@ -420,7 +444,7 @@ def test_backtesting_start_no_data(default_conf, mocker, caplog, testdatadir) ->
 
     backtesting = Backtesting(default_conf)
     backtesting._set_strategy(backtesting.strategylist[0])
-    with pytest.raises(OperationalException, match="No data found. Terminating."):
+    with pytest.raises(OperationalException, match=r"No data found. Terminating\."):
         backtesting.start()
 
 
@@ -441,7 +465,7 @@ def test_backtesting_no_pair_left(default_conf, mocker) -> None:
     default_conf["export"] = "none"
     default_conf["timerange"] = "20180101-20180102"
 
-    with pytest.raises(OperationalException, match="No pair in whitelist."):
+    with pytest.raises(OperationalException, match=r"No pair in whitelist\."):
         Backtesting(default_conf)
 
     default_conf.update(
@@ -452,7 +476,7 @@ def test_backtesting_no_pair_left(default_conf, mocker) -> None:
     )
 
     with pytest.raises(
-        OperationalException, match="Detail timeframe must be smaller than strategy timeframe."
+        OperationalException, match=r"Detail timeframe must be smaller than strategy timeframe\."
     ):
         Backtesting(default_conf)
 
@@ -493,7 +517,7 @@ def test_backtesting_pairlist_list(default_conf, mocker, tickers) -> None:
     default_conf["strategy_list"] = [CURRENT_TEST_STRATEGY, "StrategyTestV2"]
     with pytest.raises(
         OperationalException,
-        match="PrecisionFilter not allowed for backtesting multiple strategies.",
+        match=r"PrecisionFilter not allowed for backtesting multiple strategies\.",
     ):
         Backtesting(default_conf)
 
@@ -663,7 +687,7 @@ def test_backtest__check_trade_exit(default_conf, mocker) -> None:
     backtesting._set_strategy(backtesting.strategylist[0])
     pair = "UNITTEST/BTC"
     row = [
-        pd.Timestamp(year=2020, month=1, day=1, hour=4, minute=55, tzinfo=timezone.utc),
+        pd.Timestamp(year=2020, month=1, day=1, hour=4, minute=55, tzinfo=UTC),
         200,  # Open
         201.5,  # High
         195,  # Low
@@ -681,7 +705,7 @@ def test_backtest__check_trade_exit(default_conf, mocker) -> None:
     assert isinstance(trade, LocalTrade)
 
     row_sell = [
-        pd.Timestamp(year=2020, month=1, day=1, hour=5, minute=0, tzinfo=timezone.utc),
+        pd.Timestamp(year=2020, month=1, day=1, hour=5, minute=0, tzinfo=UTC),
         200,  # Open
         210.5,  # High
         195,  # Low
@@ -699,7 +723,7 @@ def test_backtest__check_trade_exit(default_conf, mocker) -> None:
     res = backtesting._check_trade_exit(trade, row_sell, row_sell[0].to_pydatetime())
     assert res is not None
     assert res.exit_reason == ExitType.ROI.value
-    assert res.close_date_utc == datetime(2020, 1, 1, 5, 0, tzinfo=timezone.utc)
+    assert res.close_date_utc == datetime(2020, 1, 1, 5, 0, tzinfo=UTC)
 
     # Enter new trade
     trade = backtesting._enter_trade(pair, row=row, direction="long")
@@ -904,7 +928,7 @@ def test_backtest_one_detail(default_conf_usdt, mocker, testdatadir, use_detail)
         assert len(t["orders"]) == 2
 
         entryo = t["orders"][0]
-        entry_ts = datetime.fromtimestamp(entryo["order_filled_timestamp"] // 1000, tz=timezone.utc)
+        entry_ts = datetime.fromtimestamp(entryo["order_filled_timestamp"] // 1000, tz=UTC)
         if entry_ts > t["open_date"]:
             late_entry += 1
 
@@ -1015,7 +1039,7 @@ def test_backtest_one_detail_futures(
         assert len(t["orders"]) == 2
 
         entryo = t["orders"][0]
-        entry_ts = datetime.fromtimestamp(entryo["order_filled_timestamp"] // 1000, tz=timezone.utc)
+        entry_ts = datetime.fromtimestamp(entryo["order_filled_timestamp"] // 1000, tz=UTC)
         if entry_ts > t["open_date"]:
             late_entry += 1
 
@@ -1097,7 +1121,7 @@ def test_backtest_one_detail_futures_funding_fees(
         return df
 
     def adjust_trade_position(trade, current_time, **kwargs):
-        if current_time > datetime(2021, 11, 18, 2, 0, 0, tzinfo=timezone.utc):
+        if current_time > datetime(2021, 11, 18, 2, 0, 0, tzinfo=UTC):
             return None
         return default_conf_usdt["stake_amount"]
 
@@ -2540,7 +2564,7 @@ def test_backtest_start_multi_strat_caching(
     mocker.patch("freqtrade.optimize.backtesting.Backtesting.backtest", backtestmock)
     mocker.patch("freqtrade.optimize.backtesting.show_backtest_results", MagicMock())
 
-    now = min_backtest_date = datetime.now(tz=timezone.utc)
+    now = min_backtest_date = datetime.now(tz=UTC)
     start_time = now - timedelta(**start_delta) + timedelta(hours=1)
     if cache == "none":
         min_backtest_date = now + timedelta(days=1)
@@ -2691,3 +2715,75 @@ def test_get_backtest_metadata_filename():
     filename = "backtest_results_zip.zip"
     expected = Path("backtest_results_zip.meta.json")
     assert get_backtest_metadata_filename(filename) == expected
+
+
+@pytest.mark.parametrize("dynamic_pairlist", [True, False])
+def test_time_pair_generator_refresh_pairlist(mocker, default_conf, dynamic_pairlist):
+    patch_exchange(mocker)
+    default_conf["enable_dynamic_pairlist"] = dynamic_pairlist
+    backtesting = Backtesting(default_conf)
+    backtesting._set_strategy(backtesting.strategylist[0])
+    assert backtesting.dynamic_pairlist == dynamic_pairlist
+
+    refresh_mock = mocker.patch(
+        "freqtrade.plugins.pairlistmanager.PairListManager.refresh_pairlist"
+    )
+
+    # Simulate 2 candles
+    start_date = datetime(2025, 1, 1, 0, 0, tzinfo=UTC)
+    end_date = start_date + timedelta(minutes=10)
+    pairs = default_conf["exchange"]["pair_whitelist"]
+    data = {pair: [] for pair in pairs}
+
+    # Simulate backtest loop
+    list(backtesting.time_pair_generator(start_date, end_date, pairs, data))
+
+    if dynamic_pairlist:
+        assert refresh_mock.call_count == 2
+    else:
+        assert refresh_mock.call_count == 0
+
+
+@pytest.mark.parametrize("dynamic_pairlist", [True, False])
+def test_time_pair_generator_open_trades_first(mocker, default_conf, dynamic_pairlist):
+    patch_exchange(mocker)
+    default_conf["enable_dynamic_pairlist"] = dynamic_pairlist
+    backtesting = Backtesting(default_conf)
+    backtesting._set_strategy(backtesting.strategylist[0])
+    assert backtesting.dynamic_pairlist == dynamic_pairlist
+
+    pairs = ["XRP/BTC", "LTC/BTC", "NEO/BTC", "ETH/BTC"]
+
+    # Simulate open trades
+    trades = [
+        LocalTrade(pair="XRP/BTC", open_date=dt_now(), amount=1, open_rate=1),
+        LocalTrade(pair="NEO/BTC", open_date=dt_now(), amount=1, open_rate=1),
+    ]
+    LocalTrade.bt_trades_open = trades
+    LocalTrade.bt_trades_open_pp = {
+        "XRP/BTC": [trades[0]],
+        "NEO/BTC": [trades[1]],
+        "LTC/BTC": [],
+        "ETH/BTC": [],
+    }
+
+    start_date = datetime(2025, 1, 1, 0, 0, tzinfo=UTC)
+    end_date = start_date + timedelta(minutes=5)
+    dummy_row = (end_date, 1.0, 1.1, 0.9, 1.0, 0, 0, 0, 0, None, None)
+    data = {pair: [dummy_row] for pair in pairs}
+
+    def mock_refresh(self):
+        # Simulate shuffle
+        self._whitelist = pairs[::-1]  # ['ETH/BTC', 'NEO/BTC', 'LTC/BTC', 'XRP/BTC']
+
+    mocker.patch("freqtrade.plugins.pairlistmanager.PairListManager.refresh_pairlist", mock_refresh)
+
+    processed_pairs = []
+    for _, pair, _, _, _ in backtesting.time_pair_generator(start_date, end_date, pairs, data):
+        processed_pairs.append(pair)
+
+    # Open trades first in both cases
+    if dynamic_pairlist:
+        assert processed_pairs == ["XRP/BTC", "NEO/BTC", "ETH/BTC", "LTC/BTC"]
+    else:
+        assert processed_pairs == ["XRP/BTC", "NEO/BTC", "LTC/BTC", "ETH/BTC"]

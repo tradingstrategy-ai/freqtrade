@@ -5,7 +5,7 @@ This module contains class to define a RPC communications
 import logging
 from abc import abstractmethod
 from collections.abc import Generator, Sequence
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import psutil
@@ -34,8 +34,8 @@ from freqtrade.exchange import Exchange, timeframe_to_minutes, timeframe_to_msec
 from freqtrade.exchange.exchange_utils import price_to_precision
 from freqtrade.ft_types import AnnotationType
 from freqtrade.loggers import bufferHandler
-from freqtrade.persistence import CustomDataWrapper, KeyValueStore, PairLocks, Trade
-from freqtrade.persistence.models import PairLock
+from freqtrade.persistence import CustomDataWrapper, KeyValueStore, Order, PairLocks, Trade
+from freqtrade.persistence.models import PairLock, custom_data_rpc_wrapper
 from freqtrade.plugins.pairlist.pairlist_helpers import expand_pairlist
 from freqtrade.rpc.fiat_convert import CryptoToFiatConverter
 from freqtrade.rpc.rpc_types import RPCSendMsg
@@ -136,6 +136,7 @@ class RPC:
             "strategy_version": strategy_version,
             "dry_run": config["dry_run"],
             "trading_mode": config.get("trading_mode", "spot"),
+            "margin_mode": config.get("margin_mode", ""),
             "short_allowed": config.get("trading_mode", "spot") != "spot",
             "stake_currency": config["stake_currency"],
             "stake_currency_decimals": decimals_per_coin(config["stake_currency"]),
@@ -375,7 +376,7 @@ class RPC:
         """
         :param timeunit: Valid entries are 'days', 'weeks', 'months'
         """
-        start_date = datetime.now(timezone.utc).date()
+        start_date = datetime.now(UTC).date()
         if timeunit == "weeks":
             # weekly
             start_date = start_date - timedelta(days=start_date.weekday())  # Monday
@@ -502,20 +503,13 @@ class RPC:
         durations = {"wins": wins_dur, "draws": draws_dur, "losses": losses_dur}
         return {"exit_reasons": exit_reasons, "durations": durations}
 
-    def _rpc_trade_statistics(
-        self, stake_currency: str, fiat_display_currency: str, start_date: datetime | None = None
+    def _collect_trade_statistics_data(
+        self,
+        trades: Sequence["Trade"],
+        stake_currency: str,
+        fiat_display_currency: str,
     ) -> dict[str, Any]:
-        """Returns cumulative profit statistics"""
-
-        start_date = datetime.fromtimestamp(0) if start_date is None else start_date
-
-        trade_filter = (
-            Trade.is_open.is_(False) & (Trade.close_date >= start_date)
-        ) | Trade.is_open.is_(True)
-        trades: Sequence[Trade] = Trade.session.scalars(
-            Trade.get_trades_query(trade_filter, include_orders=False).order_by(Trade.id)
-        ).all()
-
+        """Iterate trades, calculate various statistics, and return intermediate results."""
         profit_all_coin = []
         profit_all_ratio = []
         profit_closed_coin = []
@@ -544,7 +538,7 @@ class RPC:
                     losing_trades += 1
                     losing_profit += profit_abs
             else:
-                # Get current rate
+                # Get current rate for open trades
                 if len(trade.select_filled_orders(trade.entry_side)) == 0:
                     # Skip trades with no filled orders
                     continue
@@ -558,17 +552,74 @@ class RPC:
                     profit_abs = nan
                 else:
                     _profit = trade.calculate_profit(trade.close_rate or current_rate)
-
                     profit_ratio = _profit.profit_ratio
                     profit_abs = _profit.total_profit
 
             profit_all_coin.append(profit_abs)
             profit_all_ratio.append(profit_ratio)
 
+        return {
+            "profit_all_coin": profit_all_coin,
+            "profit_all_ratio": profit_all_ratio,
+            "profit_closed_coin": profit_closed_coin,
+            "profit_closed_ratio": profit_closed_ratio,
+            "durations": durations,
+            "winning_trades": winning_trades,
+            "losing_trades": losing_trades,
+            "winning_profit": winning_profit,
+            "losing_profit": losing_profit,
+        }
+
+    def _rpc_trade_statistics(
+        self,
+        stake_currency: str,
+        fiat_display_currency: str,
+        start_date: datetime | None = None,
+        direction: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Returns cumulative profit statistics, with optional direction filter (long/short)
+        """
+        start_date = datetime.fromtimestamp(0) if start_date is None else start_date
+
+        trade_filter = (
+            Trade.is_open.is_(False) & (Trade.close_date >= start_date)
+        ) | Trade.is_open.is_(True)
+
+        if direction == "long":
+            dir_filter = Trade.is_short.is_(False)
+            trade_filter = trade_filter & dir_filter
+        elif direction == "short":
+            dir_filter = Trade.is_short.is_(True)
+            trade_filter = trade_filter & dir_filter
+
+        trades: Sequence[Trade] = Trade.session.scalars(
+            Trade.get_trades_query(trade_filter, include_orders=False).order_by(Trade.id)
+        ).all()
+
+        stats = self._collect_trade_statistics_data(trades, stake_currency, fiat_display_currency)
+
+        profit_all_coin = stats["profit_all_coin"]
+        profit_all_ratio = stats["profit_all_ratio"]
+        profit_closed_coin = stats["profit_closed_coin"]
+        profit_closed_ratio = stats["profit_closed_ratio"]
+        durations = stats["durations"]
+        winning_trades = stats["winning_trades"]
+        losing_trades = stats["losing_trades"]
+        winning_profit = stats["winning_profit"]
+        losing_profit = stats["losing_profit"]
+
         closed_trade_count = len([t for t in trades if not t.is_open])
 
-        best_pair = Trade.get_best_pair(start_date)
-        trading_volume = Trade.get_trading_volume(start_date)
+        best_pair_filters = [Trade.close_date > start_date]
+        trading_volume_filters = [Order.order_filled_date >= start_date]
+
+        if direction:
+            best_pair_filters.append(dir_filter)
+            trading_volume_filters.append(dir_filter)
+
+        best_pair = Trade.get_best_pair(best_pair_filters)
+        trading_volume = Trade.get_trading_volume(trading_volume_filters)
 
         # Prepare data to display
         profit_closed_coin_sum = round(sum(profit_closed_coin), 8)
@@ -681,6 +732,11 @@ class RPC:
             "max_drawdown_end_timestamp": dt_ts_def(drawdown.low_date),
             "drawdown_high": drawdown.high_value,
             "drawdown_low": drawdown.low_value,
+            "current_drawdown": drawdown.current_relative_account_drawdown,
+            "current_drawdown_abs": drawdown.current_drawdown_abs,
+            "current_drawdown_high": drawdown.current_high_value,
+            "current_drawdown_start": format_date(drawdown.current_high_date),
+            "current_drawdown_start_timestamp": dt_ts_def(drawdown.current_high_date),
             "trading_volume": trading_volume,
             "bot_start_timestamp": dt_ts_def(bot_start, 0),
             "bot_start_date": format_date(bot_start),
@@ -1094,7 +1150,7 @@ class RPC:
             trade = Trade.get_trades(trade_filter=[Trade.id == trade_id]).first()
             if not trade:
                 logger.warning("delete trade: Invalid argument received")
-                raise RPCException("invalid argument")
+                raise RPCException(f"Trade with id '{trade_id}' not found.")
 
             # Try cancelling regular order if that exists
             for open_order in trade.open_orders:
@@ -1115,16 +1171,20 @@ class RPC:
                         c_count += 1
                     except ExchangeError:
                         pass
-
+            trade_pair = trade.pair
             trade.delete()
             self._freqtrade.wallets.update()
             return {
                 "result": "success",
                 "trade_id": trade_id,
-                "result_msg": f"Deleted trade {trade_id}. Closed {c_count} open orders.",
+                "result_msg": (
+                    f"Deleted trade #{trade_id} for pair {trade_pair}. "
+                    f"Closed {c_count} open orders."
+                ),
                 "cancel_order_count": c_count,
             }
 
+    @custom_data_rpc_wrapper
     def _rpc_list_custom_data(
         self, trade_id: int | None = None, key: str | None = None, limit: int = 100, offset: int = 0
     ) -> list[dict[str, Any]]:
@@ -1137,6 +1197,7 @@ class RPC:
         - "custom_data": a list of custom data dicts, each with the fields:
                 "id", "key", "type", "value", "created_at", "updated_at"
         """
+
         trades: Sequence[Trade]
         if trade_id is None:
             # Get all open trades
@@ -1257,7 +1318,7 @@ class RPC:
 
         for lock in locks:
             lock.active = False
-            lock.lock_end_time = datetime.now(timezone.utc)
+            lock.lock_end_time = datetime.now(UTC)
 
         Trade.commit()
 
@@ -1342,12 +1403,6 @@ class RPC:
         #       "freqtrade.worker", "INFO", "Starting worker develop"]
 
         return {"log_count": len(records), "logs": records}
-
-    def _rpc_edge(self) -> list[dict[str, Any]]:
-        """Returns information related to Edge"""
-        if not self._freqtrade.edge:
-            raise RPCException("Edge is not enabled.")
-        return self._freqtrade.edge.accepted_pairs()
 
     @staticmethod
     def _convert_dataframe_to_dict(

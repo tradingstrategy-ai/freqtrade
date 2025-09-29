@@ -1,8 +1,8 @@
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Required
 
 from pydantic import TypeAdapter
-from typing_extensions import Required, TypedDict
+from typing_extensions import TypedDict
 
 
 class AnnotationType(TypedDict, total=False):
@@ -13,6 +13,7 @@ class AnnotationType(TypedDict, total=False):
     y_end: float
     color: str
     label: str
+    z_level: int
 
 
 AnnotationTypeTA = TypeAdapter(AnnotationType)

@@ -145,22 +145,26 @@ class LookaheadAnalysisSubFunctions:
             config["enable_protections"] = False
             logger.info(
                 "Protections were enabled. "
-                "Disabling protections now "
-                "since they could otherwise produce false positives."
+                "Disabling protections now since they can produce false positives."
             )
+        if not config.get("lookahead_allow_limit_orders", False):
+            logger.info("Forced order_types to market orders.")
+            config["order_types"] = {
+                "entry": "market",
+                "exit": "market",
+                "stoploss": "market",
+                "stoploss_on_exchange": False,
+            }
+        else:
+            logger.info("Using configured order_types, skipping order_types override.")
+
         if config["targeted_trade_amount"] < config["minimum_trade_amount"]:
             # this combo doesn't make any sense.
             raise OperationalException(
                 "Targeted trade amount can't be smaller than minimum trade amount."
             )
-        if len(config["pairs"]) > config.get("max_open_trades", 0):
-            logger.info(
-                "Max_open_trades were less than amount of pairs "
-                "or defined in the strategy. "
-                "Set max_open_trades to amount of pairs "
-                "just to avoid false positives."
-            )
-            config["max_open_trades"] = len(config["pairs"])
+        config["max_open_trades"] = -1
+        logger.info("Forced max_open_trades to -1 (same amount as there are pairs)")
 
         min_dry_run_wallet = 1000000000
         if get_dry_run_wallet(config) < min_dry_run_wallet:

@@ -354,6 +354,7 @@ def test_informative_decorator(mocker, default_conf_usdt, trading_mode):
     default_conf_usdt["strategy"] = "InformativeDecoratorTest"
     strategy = StrategyResolver.load_strategy(default_conf_usdt)
     exchange = get_patched_exchange(mocker, default_conf_usdt)
+    default_conf_usdt["candle_type_def"] = candle_def
     strategy.dp = DataProvider({}, exchange, None)
     mocker.patch.object(
         strategy.dp, "current_whitelist", return_value=["XRP/USDT", "LTC/USDT", "NEO/USDT"]
@@ -379,9 +380,10 @@ def test_informative_decorator(mocker, default_conf_usdt, trading_mode):
         assert inf_pair in strategy.gather_informative_pairs()
 
     def test_historic_ohlcv(pair, timeframe, candle_type):
-        return data[
-            (pair, timeframe or strategy.timeframe, CandleType.from_string(candle_type))
-        ].copy()
+        return data.get(
+            (pair, timeframe or strategy.timeframe, CandleType.from_string(candle_type)),
+            pd.DataFrame(),
+        ).copy()
 
     mocker.patch(
         "freqtrade.data.dataprovider.DataProvider.historic_ohlcv", side_effect=test_historic_ohlcv
@@ -404,3 +406,12 @@ def test_informative_decorator(mocker, default_conf_usdt, trading_mode):
     for _, dataframe in analyzed.items():
         for col in expected_columns:
             assert col in dataframe.columns
+
+    # Test non-available pairs
+    del data[("ETH/BTC", "1h", CandleType.SPOT)]
+    with pytest.raises(
+        ValueError, match=r"Informative dataframe for \(ETH\/BTC, 1h, spot\) is empty.*"
+    ):
+        strategy.advise_all_indicators(
+            {p: data[(p, strategy.timeframe, candle_def)] for p in ("XRP/USDT", "LTC/USDT")}
+        )
