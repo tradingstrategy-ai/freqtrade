@@ -56,7 +56,7 @@ class Aster(Exchange):
             "ASTERCR": "USDC",
             "ASTUSD": "USDT",
         },
-        "uses_leverage_tiers": False,
+        "uses_leverage_tiers": True,
     }
 
     _supported_trading_mode_margin_pairs: list[tuple[TradingMode, MarginMode]] = [
