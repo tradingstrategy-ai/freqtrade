@@ -26,17 +26,9 @@ These modes can be configured with these values:
 Stoploss on exchange is only supported for the following exchanges, and not all exchanges support both stop-limit and stop-market.
 The Order-type will be ignored if only one mode is available.
 
-| Exchange | stop-loss type |
-|----------|-------------|
-| Binance  | limit |
-| Binance Futures  | market, limit |
-| Bingx    | market, limit |
-| HTX      | limit |
-| kraken   | market, limit |
-| Gate     | limit |
-| Okx      | limit |
-| Kucoin   | stop-limit, stop-market|
-| Hyperliquid (futures only)   | limit |
+??? info "Supported exchanges and stoploss types"
+    
+    --8<-- "includes/exchange-features.md"
 
 !!! Note "Tight stoploss"
     <ins>Do not set too low/tight stoploss value when using stop loss on exchange!</ins>  
@@ -256,4 +248,4 @@ The new stoploss value will be applied to open trades (and corresponding log-mes
 
 ### Limitations
 
-Stoploss values cannot be changed if `trailing_stop` is enabled and the stoploss has already been adjusted, or if [Edge](edge.md) is enabled (since Edge would recalculate stoploss based on the current market situation).
+Stoploss values cannot be changed if `trailing_stop` is enabled and the stoploss has already been adjusted.

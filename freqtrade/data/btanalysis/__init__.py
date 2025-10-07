@@ -16,15 +16,13 @@ from .bt_fileutils import (
     load_backtest_data,
     load_backtest_metadata,
     load_backtest_stats,
-    load_exit_signal_candles,
     load_file_from_zip,
-    load_rejected_signals,
-    load_signal_candles,
     load_trades,
     load_trades_from_db,
     trade_list_to_dataframe,
     update_backtest_metadata,
 )
+from .historic_precision import get_tick_size_over_time
 from .trade_parallelism import (
     analyze_trade_parallelism,
     evaluate_result_multi,

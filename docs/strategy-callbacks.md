@@ -12,6 +12,7 @@ Currently available callbacks:
 * [`custom_stake_amount()`](#stake-size-management)
 * [`custom_exit()`](#custom-exit-signal)
 * [`custom_stoploss()`](#custom-stoploss)
+* [`custom_roi()`](#custom-roi)
 * [`custom_entry_price()` and `custom_exit_price()`](#custom-order-price-rules)
 * [`check_entry_timeout()` and `check_exit_timeout()`](#custom-order-timeout-rules)
 * [`confirm_trade_entry()`](#trade-entry-buy-order-confirmation)
@@ -25,6 +26,9 @@ Currently available callbacks:
     You can find the callback calling sequence in [bot-basics](bot-basics.md#bot-execution-logic)
 
 --8<-- "includes/strategy-imports.md"
+
+--8<-- "includes/strategy-exit-comparisons.md"
+
 
 ## Bot start
 
@@ -121,7 +125,7 @@ Freqtrade will fall back to the `proposed_stake` value should your code raise an
 
 Called for open trade every throttling iteration (roughly every 5 seconds) until a trade is closed.
 
-Allows to define custom exit signals, indicating that specified position should be sold. This is very useful when we need to customize exit conditions for each individual trade, or if you need trade data to make an exit decision.
+Allows to define custom exit signals, indicating that specified position should be closed (full exit). This is very useful when we need to customize exit conditions for each individual trade, or if you need trade data to make an exit decision.
 
 For example you could implement a 1:2 risk-reward ROI with `custom_exit()`.
 
@@ -178,6 +182,8 @@ Returning `None` will be interpreted as "no desire to change", and is the only s
 
 Stoploss on exchange works similar to `trailing_stop`, and the stoploss on exchange is updated as configured in `stoploss_on_exchange_interval` ([More details about stoploss on exchange](stoploss.md#stop-loss-on-exchangefreqtrade)).
 
+If you're on futures markets, please take note of the [stoploss and leverage](stoploss.md#stoploss-and-leverage) section, as the stoploss value returned from `custom_stoploss` is the risk for this trade - not the relative price movement.
+
 !!! Note "Use of dates"
     All time-based calculations should be done based on `current_time` - using `datetime.now()` or `datetime.utcnow()` is discouraged, as this will break backtesting support.
 
@@ -233,7 +239,7 @@ class AwesomeStrategy(IStrategy):
         :param **kwargs: Ensure to keep this here so updates to this won't break your strategy.
         :return float: New stoploss value, relative to the current_rate
         """
-        return -0.04
+        return -0.04 * trade.leverage
 ```
 
 #### Time based trailing stop
@@ -255,9 +261,9 @@ class AwesomeStrategy(IStrategy):
 
         # Make sure you have the longest interval first - these conditions are evaluated from top to bottom.
         if current_time - timedelta(minutes=120) > trade.open_date_utc:
-            return -0.05
+            return -0.05 * trade.leverage
         elif current_time - timedelta(minutes=60) > trade.open_date_utc:
-            return -0.10
+            return -0.10 * trade.leverage
         return None
 ```
 
@@ -284,9 +290,9 @@ class AwesomeStrategy(IStrategy):
             return stoploss_from_open(0.10, current_profit, is_short=trade.is_short, leverage=trade.leverage)
         # Make sure you have the longest interval first - these conditions are evaluated from top to bottom.
         if current_time - timedelta(minutes=120) > trade.open_date_utc:
-            return -0.05
+            return -0.05 * trade.leverage
         elif current_time - timedelta(minutes=60) > trade.open_date_utc:
-            return -0.10
+            return -0.10 * trade.leverage
         return None
 ```
 
@@ -309,10 +315,10 @@ class AwesomeStrategy(IStrategy):
                         **kwargs) -> float | None:
 
         if pair in ("ETH/BTC", "XRP/BTC"):
-            return -0.10
+            return -0.10 * trade.leverage
         elif pair in ("LTC/BTC"):
-            return -0.05
-        return -0.15
+            return -0.05 * trade.leverage
+        return -0.15 * trade.leverage
 ```
 
 #### Trailing stoploss with positive offset
@@ -341,7 +347,7 @@ class AwesomeStrategy(IStrategy):
         desired_stoploss = current_profit / 2
 
         # Use a minimum of 2.5% and a maximum of 5%
-        return max(min(desired_stoploss, 0.05), 0.025)
+        return max(min(desired_stoploss, 0.05), 0.025) * trade.leverage
 ```
 
 #### Stepped stoploss
@@ -494,6 +500,135 @@ The helper function `stoploss_from_absolute()` can be used to convert from an ab
                                           leverage=trade.leverage)
 
     ```
+
+---
+
+## Custom ROI
+
+Called for open trade every iteration (roughly every 5 seconds) until a trade is closed.
+
+The usage of the custom ROI method must be enabled by setting `use_custom_roi=True` on the strategy object.
+
+This method allows you to define a custom minimum ROI threshold for exiting a trade, expressed as a ratio (e.g., `0.05` for 5% profit). If both `minimal_roi` and `custom_roi` are defined, the lower of the two thresholds will trigger an exit. For example, if `minimal_roi` is set to `{"0": 0.10}` (10% at 0 minutes) and `custom_roi` returns `0.05`, the trade will exit when the profit reaches 5%. Also, if `custom_roi` returns `0.10` and `minimal_roi` is set to `{"0": 0.05}` (5% at 0 minutes), the trade will be closed when the profit reaches 5%.
+
+The method must return a float representing the new ROI threshold as a ratio, or `None` to fall back to the `minimal_roi` logic. Returning `NaN` or `inf` values is considered invalid and will be treated as `None`, causing the bot to use the `minimal_roi` configuration.
+
+### Custom ROI examples
+
+The following examples illustrate how to use the `custom_roi` function to implement different ROI logics.
+
+#### Custom ROI per side
+
+Use different ROI thresholds depending on the `side`. In this example, 5% for long entries and 2% for short entries.
+
+```python
+# Default imports
+
+class AwesomeStrategy(IStrategy):
+
+    use_custom_roi = True
+
+    # ... populate_* methods
+
+    def custom_roi(self, pair: str, trade: Trade, current_time: datetime, trade_duration: int,
+                   entry_tag: str | None, side: str, **kwargs) -> float | None:
+        """
+        Custom ROI logic, returns a new minimum ROI threshold (as a ratio, e.g., 0.05 for +5%).
+        Only called when use_custom_roi is set to True.
+
+        If used at the same time as minimal_roi, an exit will be triggered when the lower
+        threshold is reached. Example: If minimal_roi = {"0": 0.01} and custom_roi returns 0.05,
+        an exit will be triggered if profit reaches 5%.
+
+        :param pair: Pair that's currently analyzed.
+        :param trade: trade object.
+        :param current_time: datetime object, containing the current datetime.
+        :param trade_duration: Current trade duration in minutes.
+        :param entry_tag: Optional entry_tag (buy_tag) if provided with the buy signal.
+        :param side: 'long' or 'short' - indicating the direction of the current trade.
+        :param **kwargs: Ensure to keep this here so updates to this won't break your strategy.
+        :return float: New ROI value as a ratio, or None to fall back to minimal_roi logic.
+        """
+        return 0.05 if side == "long" else 0.02
+```
+
+#### Custom ROI per pair
+
+Use different ROI thresholds depending on the `pair`.
+
+```python
+# Default imports
+
+class AwesomeStrategy(IStrategy):
+
+    use_custom_roi = True
+
+    # ... populate_* methods
+
+    def custom_roi(self, pair: str, trade: Trade, current_time: datetime, trade_duration: int,
+                   entry_tag: str | None, side: str, **kwargs) -> float | None:
+
+        stake = trade.stake_currency
+        roi_map = {
+            f"BTC/{stake}": 0.02, # 2% for BTC
+            f"ETH/{stake}": 0.03, # 3% for ETH
+            f"XRP/{stake}": 0.04, # 4% for XRP
+        }
+
+        return roi_map.get(pair, 0.01) # 1% for any other pair
+```
+
+#### Custom ROI per entry tag
+
+Use different ROI thresholds depending on the `entry_tag` provided with the buy signal.
+
+```python
+# Default imports
+
+class AwesomeStrategy(IStrategy):
+
+    use_custom_roi = True
+
+    # ... populate_* methods
+
+    def custom_roi(self, pair: str, trade: Trade, current_time: datetime, trade_duration: int,
+                   entry_tag: str | None, side: str, **kwargs) -> float | None:
+
+        roi_by_tag = {
+            "breakout": 0.08,       # 8% if tag is "breakout"
+            "rsi_overbought": 0.05, # 5% if tag is "rsi_overbought"
+            "mean_reversion": 0.03, # 3% if tag is "mean_reversion"
+        }
+
+        return roi_by_tag.get(entry_tag, 0.01)  # 1% if tag is unknown
+```
+
+#### Custom ROI based on ATR
+
+ROI value may be derived from indicators stored in dataframe. This example uses the ATR ratio as ROI.
+
+``` python
+# Default imports
+# <...>
+import talib.abstract as ta
+
+class AwesomeStrategy(IStrategy):
+
+    use_custom_roi = True
+
+    def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        # <...>
+        dataframe["atr"] = ta.ATR(dataframe, timeperiod=10)
+
+    def custom_roi(self, pair: str, trade: Trade, current_time: datetime, trade_duration: int,
+                   entry_tag: str | None, side: str, **kwargs) -> float | None:
+
+        dataframe, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+        last_candle = dataframe.iloc[-1].squeeze()
+        atr_ratio = last_candle["atr"] / last_candle["close"]
+
+        return atr_ratio # Returns the ATR value as ratio
+```
 
 ---
 
@@ -1108,6 +1243,10 @@ class AwesomeStrategy(IStrategy):
 
 ```
 
+!!! Tip "Learn more about storing data"
+    You can learn more about storing data on the [Storing custom trade data](strategy-advanced.md#storing-information-persistent) section.
+    Please keep in mind that this is considered advanced usage, and should be used with care.
+
 ## Plot annotations callback
 
 The plot annotations callback is called whenever freqUI requests data to display a chart.
@@ -1126,6 +1265,7 @@ The full object looks like this:
     "y_start": 94000.2,  // Price / y axis value
     "y_end": 98000, // Price / y axis value
     "color": "",
+    "z_level": 5, // z-level, higher values are drawn on top of lower values. Positions relative to the Chart elements need to be set in freqUI.
     "label": "some label"
 }
 ```
@@ -1217,6 +1357,7 @@ Entries will be validated, and won't be passed to the UI if they don't correspon
                             "y_end": price * 1.01,
                             "y_start": price * 0.99,
                             "color": "rgba(0, 255, 0, 0.4)",
+                            "z_level": 5,
                         }
                     )
 

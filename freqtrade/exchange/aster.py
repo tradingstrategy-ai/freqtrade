@@ -1,4 +1,7 @@
-"""Aster exchange subclass"""
+"""Aster exchange subclass.
+
+- Initial implementation copy-pasted from Binance subclass
+"""
 
 import logging
 from datetime import datetime, timezone, timedelta
@@ -22,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class Aster(Exchange):
+
     _ft_has: FtHas = {
         "stoploss_on_exchange": True,
         "stop_price_param": "stopPrice",
@@ -34,6 +38,7 @@ class Aster(Exchange):
         "l2_limit_range": [5, 10, 20, 50, 100, 500, 1000],
         "ws_enabled": True,
     }
+
     _ft_has_futures: FtHas = {
         "funding_fee_candle_limit": 1000,
         "stoploss_order_types": {"limit": "stop", "market": "stop_market"},
@@ -46,11 +51,12 @@ class Aster(Exchange):
             PriceType.LAST: "CONTRACT_PRICE",
             PriceType.MARK: "MARK_PRICE",
         },
-        "ws_enabled": False,
+        "ws_enabled": True,
         "proxy_coin_mapping": {
             "ASTERCR": "USDC",
             "ASTUSD": "USDT",
         },
+        "uses_leverage_tiers": True,
     }
 
     _supported_trading_mode_margin_pairs: list[tuple[TradingMode, MarginMode]] = [
@@ -59,6 +65,19 @@ class Aster(Exchange):
         (TradingMode.FUTURES, MarginMode.CROSS),
         (TradingMode.FUTURES, MarginMode.ISOLATED),
     ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def validate_config(self, config):
+        super().validate_config(config)
+
+        # Monkey patch None -> empty dict as needed
+        self._api_async.features = {
+            "spot": {},
+            "swap": {},
+            "future": {},
+        }
 
     def get_proxy_coin(self) -> str:
         """
@@ -126,37 +145,37 @@ class Aster(Exchange):
 
     #     except ccxt.BaseError as e:
     #         raise OperationalException(e) from e
-    
-    @retrier
-    def additional_exchange_init(self) -> None:
-        """
-        Additional exchange initialization logic.
-        .api will be available at this point.
-        Must be overridden in child methods if required.
-        """
-        try:
-            if not self._config["dry_run"]:
-                if self.trading_mode == TradingMode.FUTURES:
-                    position_mode = self._api.set_position_mode(False)
-                    self._log_exchange_response("set_position_mode", position_mode)
-                is_unified = self._api.is_unified_enabled()
-                # Returns a tuple of bools, first for margin, second for Account
-                if is_unified and len(is_unified) > 1 and is_unified[1]:
-                    self.unified_account = True
-                    logger.info(
-                        "Bybit: Unified account. Assuming dedicated subaccount for this bot."
-                    )
-                else:
-                    self.unified_account = False
-                    logger.info("Bybit: Standard account.")
-        except ccxt.DDoSProtection as e:
-            raise DDosProtection(e) from e
-        except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
-            raise TemporaryError(
-                f"Error in additional_exchange_init due to {e.__class__.__name__}. Message: {e}"
-            ) from e
-        except ccxt.BaseError as e:
-            raise OperationalException(e) from e
+    #
+    # @retrier
+    # def additional_exchange_init(self) -> None:
+    #     """
+    #     Additional exchange initialization logic.
+    #     .api will be available at this point.
+    #     Must be overridden in child methods if required.
+    #     """
+    #     try:
+    #         if not self._config["dry_run"]:
+    #             if self.trading_mode == TradingMode.FUTURES:
+    #                 position_mode = self._api.set_position_mode(False)
+    #                 self._log_exchange_response("set_position_mode", position_mode)
+    #             is_unified = self._api.is_unified_enabled()
+    #             # Returns a tuple of bools, first for margin, second for Account
+    #             if is_unified and len(is_unified) > 1 and is_unified[1]:
+    #                 self.unified_account = True
+    #                 logger.info(
+    #                     "Bybit: Unified account. Assuming dedicated subaccount for this bot."
+    #                 )
+    #             else:
+    #                 self.unified_account = False
+    #                 logger.info("Bybit: Standard account.")
+    #     except ccxt.DDoSProtection as e:
+    #         raise DDosProtection(e) from e
+    #     except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
+    #         raise TemporaryError(
+    #             f"Error in additional_exchange_init due to {e.__class__.__name__}. Message: {e}"
+    #         ) from e
+    #     except ccxt.BaseError as e:
+    #         raise OperationalException(e) from e
 
     def get_historic_ohlcv(
         self,
@@ -174,6 +193,9 @@ class Aster(Exchange):
         """
         if is_new_pair and candle_type in (CandleType.SPOT, CandleType.FUTURES, CandleType.MARK):
             with self._loop_lock:
+                assert self._api_async
+                assert self._api_async.features
+
                 x = self.loop.run_until_complete(
                     self._async_get_candle_history(pair, timeframe, candle_type, 0)
                 )
@@ -308,36 +330,36 @@ class Aster(Exchange):
                 "Freqtrade only supports isolated futures for leverage trading"
             )
 
-    def load_leverage_tiers(self) -> dict[str, list[dict]]:
-        """
-        Load leverage tiers for Aster.
-        Uses live API calls like Bybit, with caching for performance.
-        """
-        if self.trading_mode == TradingMode.FUTURES:
-            # Use the base Exchange class behavior - it will automatically
-            # call get_leverage_tiers() which uses CCXT to fetch from Aster
-            return super().load_leverage_tiers()
-        else:
-            return {}
+    # def load_leverage_tiers(self) -> dict[str, list[dict]]:
+    #     """
+    #     Load leverage tiers for Aster.
+    #     Uses live API calls like Bybit, with caching for performance.
+    #     """
+    #     if self.trading_mode == TradingMode.FUTURES:
+    #         # Use the base Exchange class behavior - it will automatically
+    #         # call get_leverage_tiers() which uses CCXT to fetch from Aster
+    #         return super().load_leverage_tiers()
+    #     else:
+    #         return {}
 
     # Optional: Add caching like Bybit does
-    @retrier
-    def get_leverage_tiers(self) -> dict[str, list[dict]]:
-        """
-        Cache leverage tiers for 1 day, since they are not expected to change often.
-        """
-        # Load cached tiers
-        tiers_cached = self.load_cached_leverage_tiers(
-            self._config["stake_currency"], timedelta(days=1)
-        )
-        if tiers_cached:
-            return tiers_cached
-
-        # Fetch tiers from exchange
-        tiers = super().get_leverage_tiers()
-
-        self.cache_leverage_tiers(tiers, self._config["stake_currency"])
-        return tiers
+    # @retrier
+    # def get_leverage_tiers(self) -> dict[str, list[dict]]:
+    #     """
+    #     Cache leverage tiers for 1 day, since they are not expected to change often.
+    #     """
+    #     # Load cached tiers
+    #     tiers_cached = self.load_cached_leverage_tiers(
+    #         self._config["stake_currency"], timedelta(days=1)
+    #     )
+    #     if tiers_cached:
+    #         return tiers_cached
+    #
+    #     # Fetch tiers from exchange
+    #     tiers = super().get_leverage_tiers()
+    #
+    #     self.cache_leverage_tiers(tiers, self._config["stake_currency"])
+    #     return tiers
 
     async def _async_get_trade_history_id_startup(
         self, pair: str, since: int

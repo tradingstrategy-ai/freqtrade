@@ -1,12 +1,11 @@
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from unittest.mock import ANY, MagicMock, PropertyMock
 
 import pytest
 from numpy import isnan
 from sqlalchemy import select
 
-from freqtrade.edge import PairInfo
 from freqtrade.enums import SignalDirection, State, TradingMode
 from freqtrade.exceptions import ExchangeError, InvalidOrderException, TemporaryError
 from freqtrade.persistence import Order, Trade
@@ -348,7 +347,7 @@ def test__rpc_timeunit_profit(
         assert day["starting_balance"] in (pytest.approx(1062.37), pytest.approx(1066.46))
         assert day["fiat_value"] in (0.0,)
     # ensure first day is current date
-    assert str(days["data"][0]["date"]) == str(datetime.now(timezone.utc).date())
+    assert str(days["data"][0]["date"]) == str(datetime.now(UTC).date())
 
     # Try invalid data
     with pytest.raises(RPCException, match=r".*must be an integer greater than 0*"):
@@ -394,7 +393,7 @@ def test_rpc_delete_trade(mocker, default_conf, fee, markets, caplog, is_short):
     freqtradebot.strategy.order_types["stoploss_on_exchange"] = True
     create_mock_trades(fee, is_short)
     rpc = RPC(freqtradebot)
-    with pytest.raises(RPCException, match="invalid argument"):
+    with pytest.raises(RPCException, match=r"Trade with id '200' not found\."):
         rpc._rpc_delete("200")
 
     trades = Trade.session.scalars(select(Trade)).all()
@@ -1205,7 +1204,7 @@ def test_rpc_force_entry(mocker, default_conf, ticker, fee, limit_buy_order_open
     patch_get_signal(freqtradebot)
     rpc = RPC(freqtradebot)
     pair = "ETH/BTC"
-    with pytest.raises(RPCException, match="Maximum number of trades is reached."):
+    with pytest.raises(RPCException, match=r"Maximum number of trades is reached\."):
         rpc._rpc_force_entry(pair, None)
     freqtradebot.config["max_open_trades"] = 5
 
@@ -1287,7 +1286,7 @@ def test_rpc_force_entry_wrong_mode(mocker, default_conf) -> None:
     patch_get_signal(freqtradebot)
     rpc = RPC(freqtradebot)
     pair = "ETH/BTC"
-    with pytest.raises(RPCException, match="Can't go short on Spot markets."):
+    with pytest.raises(RPCException, match=r"Can't go short on Spot markets\."):
         rpc._rpc_force_entry(pair, None, order_side=SignalDirection.SHORT)
 
 
@@ -1297,9 +1296,9 @@ def test_rpc_add_and_delete_lock(mocker, default_conf):
     rpc = RPC(freqtradebot)
     pair = "ETH/BTC"
 
-    rpc._rpc_add_lock(pair, datetime.now(timezone.utc) + timedelta(minutes=4), "", "*")
-    rpc._rpc_add_lock(pair, datetime.now(timezone.utc) + timedelta(minutes=5), "", "*")
-    rpc._rpc_add_lock(pair, datetime.now(timezone.utc) + timedelta(minutes=10), "", "*")
+    rpc._rpc_add_lock(pair, datetime.now(UTC) + timedelta(minutes=4), "", "*")
+    rpc._rpc_add_lock(pair, datetime.now(UTC) + timedelta(minutes=5), "", "*")
+    rpc._rpc_add_lock(pair, datetime.now(UTC) + timedelta(minutes=10), "", "*")
 
     locks = rpc._rpc_locks()
     assert locks["lock_count"] == 3
@@ -1391,36 +1390,6 @@ def test_rpc_blacklist(mocker, default_conf) -> None:
     assert ret["blacklist_expanded"] == ["ETH/BTC", "XRP/BTC", "XRP/USDT"]
     assert "errors" in ret
     assert isinstance(ret["errors"], dict)
-
-
-def test_rpc_edge_disabled(mocker, default_conf) -> None:
-    mocker.patch("freqtrade.rpc.telegram.Telegram", MagicMock())
-    freqtradebot = get_patched_freqtradebot(mocker, default_conf)
-    rpc = RPC(freqtradebot)
-    with pytest.raises(RPCException, match=r"Edge is not enabled."):
-        rpc._rpc_edge()
-
-
-def test_rpc_edge_enabled(mocker, edge_conf) -> None:
-    mocker.patch("freqtrade.rpc.telegram.Telegram", MagicMock())
-    mocker.patch(
-        "freqtrade.edge.Edge._cached_pairs",
-        mocker.PropertyMock(
-            return_value={
-                "E/F": PairInfo(-0.02, 0.66, 3.71, 0.50, 1.71, 10, 60),
-            }
-        ),
-    )
-    freqtradebot = get_patched_freqtradebot(mocker, edge_conf)
-
-    rpc = RPC(freqtradebot)
-    ret = rpc._rpc_edge()
-
-    assert len(ret) == 1
-    assert ret[0]["Pair"] == "E/F"
-    assert ret[0]["Winrate"] == 0.66
-    assert ret[0]["Expectancy"] == 1.71
-    assert ret[0]["Stoploss"] == -0.02
 
 
 def test_rpc_health(mocker, default_conf) -> None:

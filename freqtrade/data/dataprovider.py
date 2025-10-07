@@ -7,7 +7,7 @@ Common Interface for bot and strategy to access data.
 
 import logging
 from collections import deque
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from pandas import DataFrame, Timedelta, Timestamp, to_timedelta
@@ -23,7 +23,7 @@ from freqtrade.data.history import get_datahandler, load_pair_history
 from freqtrade.enums import CandleType, RPCMessageType, RunMode, TradingMode
 from freqtrade.exceptions import ExchangeError, OperationalException
 from freqtrade.exchange import Exchange, timeframe_to_prev_date, timeframe_to_seconds
-from freqtrade.exchange.exchange_types import OrderBook
+from freqtrade.exchange.exchange_types import FundingRate, OrderBook
 from freqtrade.misc import append_candles_to_dataframe
 from freqtrade.rpc import RPCManager
 from freqtrade.rpc.rpc_types import RPCAnalyzedDFMsg
@@ -98,7 +98,7 @@ class DataProvider:
         :param candle_type: Any of the enum CandleType (must match trading mode!)
         """
         pair_key = (pair, timeframe, candle_type)
-        self.__cached_pairs[pair_key] = (dataframe, datetime.now(timezone.utc))
+        self.__cached_pairs[pair_key] = (dataframe, datetime.now(UTC))
 
     # For multiple producers we will want to merge the pairlists instead of overwriting
     def _set_producer_pairs(self, pairlist: list[str], producer_name: str = "default"):
@@ -131,7 +131,7 @@ class DataProvider:
                 "data": {
                     "key": pair_key,
                     "df": dataframe.tail(1),
-                    "la": datetime.now(timezone.utc),
+                    "la": datetime.now(UTC),
                 },
             }
             self.__rpc.send_msg(msg)
@@ -164,7 +164,7 @@ class DataProvider:
         if producer_name not in self.__producer_pairs_df:
             self.__producer_pairs_df[producer_name] = {}
 
-        _last_analyzed = datetime.now(timezone.utc) if not last_analyzed else last_analyzed
+        _last_analyzed = datetime.now(UTC) if not last_analyzed else last_analyzed
 
         self.__producer_pairs_df[producer_name][pair_key] = (dataframe, _last_analyzed)
         logger.debug(f"External DataFrame for {pair_key} from {producer_name} added.")
@@ -275,12 +275,12 @@ class DataProvider:
         # If we have no data from this Producer yet
         if producer_name not in self.__producer_pairs_df:
             # We don't have this data yet, return empty DataFrame and datetime (01-01-1970)
-            return (DataFrame(), datetime.fromtimestamp(0, tz=timezone.utc))
+            return (DataFrame(), datetime.fromtimestamp(0, tz=UTC))
 
         # If we do have data from that Producer, but no data on this pair_key
         if pair_key not in self.__producer_pairs_df[producer_name]:
             # We don't have this data yet, return empty DataFrame and datetime (01-01-1970)
-            return (DataFrame(), datetime.fromtimestamp(0, tz=timezone.utc))
+            return (DataFrame(), datetime.fromtimestamp(0, tz=UTC))
 
         # We have it, return this data
         df, la = self.__producer_pairs_df[producer_name][pair_key]
@@ -396,16 +396,16 @@ class DataProvider:
                 if (max_index := self.__slice_index.get(pair)) is not None:
                     df = df.iloc[max(0, max_index - MAX_DATAFRAME_CANDLES) : max_index]
                 else:
-                    return (DataFrame(), datetime.fromtimestamp(0, tz=timezone.utc))
+                    return (DataFrame(), datetime.fromtimestamp(0, tz=UTC))
             return df, date
         else:
-            return (DataFrame(), datetime.fromtimestamp(0, tz=timezone.utc))
+            return (DataFrame(), datetime.fromtimestamp(0, tz=UTC))
 
     @property
     def runmode(self) -> RunMode:
         """
         Get runmode of the bot
-        can be "live", "dry-run", "backtest", "edgecli", "hyperopt" or "other".
+        can be "live", "dry-run", "backtest", "hyperopt" or "other".
         """
         return RunMode(self._config.get("runmode", RunMode.OTHER))
 
@@ -498,7 +498,12 @@ class DataProvider:
             return DataFrame()
 
     def trades(
-        self, pair: str, timeframe: str | None = None, copy: bool = True, candle_type: str = ""
+        self,
+        pair: str,
+        timeframe: str | None = None,
+        copy: bool = True,
+        candle_type: str = "",
+        timerange: TimeRange | None = None,
     ) -> DataFrame:
         """
         Get candle (TRADES) data for the given pair as DataFrame
@@ -526,7 +531,7 @@ class DataProvider:
                 self._config["datadir"], data_format=self._config["dataformat_trades"]
             )
             trades_df = data_handler.trades_load(
-                pair, self._config.get("trading_mode", TradingMode.SPOT)
+                pair, self._config.get("trading_mode", TradingMode.SPOT), timerange=timerange
             )
             return trades_df
 
@@ -543,6 +548,7 @@ class DataProvider:
     def ticker(self, pair: str):
         """
         Return last ticker data from exchange
+        Warning: Performs a network request - so use with common sense.
         :param pair: Pair to get the data for
         :return: Ticker dict from exchange or empty dict if ticker is not available for the pair
         """
@@ -556,7 +562,7 @@ class DataProvider:
     def orderbook(self, pair: str, maximum: int) -> OrderBook:
         """
         Fetch latest l2 orderbook data
-        Warning: Does a network request - so use with common sense.
+        Warning: Performs a network request - so use with common sense.
         :param pair: pair to get the data for
         :param maximum: Maximum number of orderbook entries to query
         :return: dict including bids/asks with a total of `maximum` entries.
@@ -564,6 +570,23 @@ class DataProvider:
         if self._exchange is None:
             raise OperationalException(NO_EXCHANGE_EXCEPTION)
         return self._exchange.fetch_l2_order_book(pair, maximum)
+
+    def funding_rate(self, pair: str) -> FundingRate:
+        """
+        Return Funding rate from the exchange
+        Warning: Performs a network request - so use with common sense.
+        :param pair: Pair to get the data for
+        :return: Funding rate dict from exchange or empty dict if funding rate is not available
+            If available, the "fundingRate" field will contain the funding rate.
+            "fundingTimestamp" and "fundingDatetime" will contain the next funding times.
+            Actually filled fields may vary between exchanges.
+        """
+        if self._exchange is None:
+            raise OperationalException(NO_EXCHANGE_EXCEPTION)
+        try:
+            return self._exchange.fetch_funding_rate(pair)
+        except ExchangeError:
+            return {}
 
     def send_msg(self, message: str, *, always_send: bool = False) -> None:
         """
@@ -581,3 +604,19 @@ class DataProvider:
         if always_send or message not in self.__msg_cache:
             self._msg_queue.append(message)
         self.__msg_cache[message] = True
+
+    def check_delisting(self, pair: str) -> datetime | None:
+        """
+        Check if a pair gonna be delisted on the exchange.
+        Will only return datetime if the pair is gonna be delisted.
+        :param pair: Pair to check
+        :return: Datetime of the pair's delisting, None otherwise
+        """
+        if self._exchange is None:
+            raise OperationalException(NO_EXCHANGE_EXCEPTION)
+
+        try:
+            return self._exchange.check_delisting_time(pair)
+        except ExchangeError:
+            logger.warning(f"Could not fetch market data for {pair}. Assuming no delisting.")
+            return None
