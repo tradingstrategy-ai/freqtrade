@@ -115,6 +115,45 @@ class Modetrade(Exchange):
     #     return new_balances
 
     @retrier
+    def additional_exchange_init(self) -> None:
+        """
+        Additional exchange initialization logic.
+        Checks for positions on exchange that don't match the configured whitelist.
+        """
+        try:
+            if self._config["dry_run"] or self.trading_mode != TradingMode.FUTURES:
+                return
+
+            positions = self.fetch_positions()
+            open_positions = [p for p in positions if p.get('contracts', 0) != 0]
+
+            if not open_positions:
+                logger.info("ModeTrade: No open positions on exchange")
+                return
+
+            whitelist = self._config.get('exchange', {}).get('pair_whitelist', [])
+            unauthorized = [p for p in open_positions if p['symbol'] not in whitelist]
+
+            logger.info(f"ModeTrade: Found {len(open_positions)} open position(s) on exchange")
+
+            if unauthorized:
+                logger.warning(
+                    f"ModeTrade: {len(unauthorized)} position(s) not in whitelist "
+                    f"(may be from another bot or manual trades):"
+                )
+                for pos in unauthorized:
+                    logger.warning(f"  {pos['symbol']}: {pos.get('contracts')} contracts")
+
+        except ccxt.DDoSProtection as e:
+            raise DDosProtection(e) from e
+        except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
+            raise TemporaryError(
+                f"Error in additional_exchange_init due to {e.__class__.__name__}. Message: {e}"
+            ) from e
+        except ccxt.BaseError as e:
+            raise OperationalException(e) from e
+
+    @retrier
     def _set_leverage(
         self,
         leverage: float,
