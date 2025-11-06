@@ -335,11 +335,11 @@ def calculate_daily_returns(
         .sum()
     )
 
-    # Create complete date range and merge (reindex fills missing days with 0)
-    date_range = pd.date_range(start=min_date, end=max_date, freq='D')
+    min_date_norm = pd.to_datetime(min_date).normalize()
+    max_date_norm = pd.to_datetime(max_date).normalize()
+    date_range = pd.date_range(start=min_date_norm, end=max_date_norm, freq='D')
     daily_returns = daily_profits.reindex(date_range, fill_value=0.0)
 
-    # Normalize by starting balance
     return daily_returns / starting_balance
 
 
