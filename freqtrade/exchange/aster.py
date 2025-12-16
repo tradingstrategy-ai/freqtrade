@@ -4,8 +4,7 @@
 """
 
 import logging
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
+from datetime import datetime, timezone
 
 import ccxt
 from pandas import DataFrame
@@ -16,9 +15,9 @@ from freqtrade.exceptions import DDosProtection, OperationalException, Temporary
 from freqtrade.exchange import Exchange
 from freqtrade.exchange.common import retrier
 from freqtrade.exchange.exchange_types import FtHas, Tickers
-from freqtrade.exchange.exchange_utils_timeframe import timeframe_to_msecs
-from freqtrade.misc import deep_merge_dicts, json_load
-from freqtrade.util.datetime_helpers import dt_from_ts, dt_ts
+from freqtrade.misc import deep_merge_dicts
+from freqtrade.util.datetime_helpers import dt_from_ts
+from typing import Any
 
 
 logger = logging.getLogger(__name__)
@@ -78,6 +77,134 @@ class Aster(Exchange):
             "swap": {},
             "future": {},
         }
+
+    @retrier
+    def additional_exchange_init(self) -> None:
+        """
+        Additional exchange initialization logic.
+
+        For futures, Freqtrade assumes one-way position mode (no hedged LONG/SHORT sides).
+        Aster supports hedge mode (dualSidePosition) - which leads to inconsistent position
+        handling and can cause reduce-only exits to be rejected.
+        """
+        try:
+            if self._config["dry_run"] or self.trading_mode != TradingMode.FUTURES:
+                return
+
+            self._ensure_one_way_mode()
+            self._fail_on_unknown_open_positions(self._get_open_exchange_positions())
+
+        except ccxt.DDoSProtection as e:
+            raise DDosProtection(e) from e
+        except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
+            raise TemporaryError(
+                f"Error in additional_exchange_init due to {e.__class__.__name__}. Message: {e}"
+            ) from e
+        except ccxt.BaseError as e:
+            raise OperationalException(e) from e
+
+    def _ensure_one_way_mode(self) -> None:
+        """
+        Ensure one-way futures mode.
+        In hedge mode, orders can apply to LONG/SHORT legs and break Freqtrade assumptions.
+        """
+        # Prefer the unified ccxt helpers (implemented by Aster in ccxt)
+        # which map to fapi/v1/positionSide/dual.
+        position_mode = self._api.fetch_position_mode()
+        self._log_exchange_response("position_mode", position_mode)
+
+        if position_mode.get("hedged") is not True:
+            return
+
+        logger.warning(
+            "Aster: Account is in hedge mode (dualSidePosition=true). "
+            "Freqtrade futures requires one-way mode. Attempting to switch to one-way."
+        )
+        res = self._api.set_position_mode(False)
+        self._log_exchange_response("set_position_mode", res)
+
+        # Re-check to be sure.
+        position_mode = self._api.fetch_position_mode()
+        self._log_exchange_response("position_mode_after_set", position_mode)
+        if position_mode.get("hedged") is True:
+            raise OperationalException(
+                "Aster futures account is in hedge mode (dualSidePosition=true). "
+                "Freqtrade requires one-way mode. Please switch Position Mode to One-way "
+                "in the Aster UI (or via API) and restart the bot."
+            )
+
+    def _get_open_exchange_positions(self) -> list[dict[str, Any]]:
+        """
+        Return normalized open positions from the exchange.
+        """
+        return [
+            p
+            for p in self.fetch_positions()
+            if p.get("symbol") and (p.get("contracts") or 0) != 0 and p.get("side") is not None
+        ]
+
+    def _get_db_open_pairs_for_startup_check(self) -> tuple[set[str] | None, str]:
+        """
+        Get open trade pairs from the DB.
+        If DB is not available yet, returns (None, <prefix>) to indicate that any open position
+        should be treated as blocking.
+        """
+        try:
+            # Import here to avoid import cycles / persistence init timing issues.
+            from freqtrade.persistence import Trade
+
+            return (
+                {t.pair for t in Trade.get_trades_proxy(is_open=True)},
+                "Aster: Found open exchange position(s) not tracked in Freqtrade DB.",
+            )
+        except Exception:
+            return (
+                None,
+                "Aster: Found open exchange position(s) at startup (DB not available yet).",
+            )
+
+    def _format_open_position_for_log(self, p: dict[str, Any]) -> str:
+        symbol = p.get("symbol")
+        contracts = p.get("contracts") or 0
+        return (
+            f"{symbol} side={p.get('side')} amount={self._contracts_to_amount(symbol, contracts)} "
+            f"contracts={contracts} entryPrice={p.get('entryPrice')} "
+            f"markPrice={p.get('markPrice')} timestamp={p.get('timestamp')}"
+        )
+
+    def _unknown_open_positions_for_startup_check(
+        self, open_positions: list[dict[str, Any]], db_open_pairs: set[str] | None
+    ) -> list[str]:
+        if db_open_pairs is None:
+            return [self._format_open_position_for_log(p) for p in open_positions]
+        return [
+            self._format_open_position_for_log(p)
+            for p in open_positions
+            if p.get("symbol") not in db_open_pairs
+        ]
+
+    def _fail_on_unknown_open_positions(self, open_positions: list[dict[str, Any]]) -> None:
+        """
+        Fail fast on open exchange positions not tracked in the DB.
+
+        This prevents "phantom trades" where a bot 'entry' order reduces an existing unknown
+        position (or modifies it) - causing exits to fail and positions to desync.
+        """
+        if not open_positions:
+            return
+
+        db_open_pairs, prefix = self._get_db_open_pairs_for_startup_check()
+        unknown = self._unknown_open_positions_for_startup_check(open_positions, db_open_pairs)
+
+        if not unknown:
+            return
+
+        logger.warning("%s Refusing to start:\n%s", prefix, "\n".join(unknown))
+        raise OperationalException(
+            f"{prefix}\n"
+            + "\n".join(unknown)
+            + "\n\nClose these positions on Aster and restart the bot to avoid phantom trades."
+        )
 
     def get_proxy_coin(self) -> str:
         """
