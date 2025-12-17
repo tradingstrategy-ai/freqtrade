@@ -187,8 +187,6 @@ class Aster(Exchange):
                     )
                     return DataFrame(columns=DEFAULT_DATAFRAME_COLUMNS)
 
-        # For Aster, we'll use the standard REST API approach
-        # Remove the fast download functionality since Aster doesn't have a public data API like Binance
         return super().get_historic_ohlcv(
             pair=pair,
             timeframe=timeframe,

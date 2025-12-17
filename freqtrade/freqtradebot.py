@@ -32,6 +32,7 @@ from freqtrade.exceptions import (
     ExchangeError,
     InsufficientFundsError,
     InvalidOrderException,
+    OperationalException,
     PricingError,
 )
 from freqtrade.exchange import (
@@ -111,6 +112,7 @@ class FreqtradeBot(LoggingMixin):
             raise
 
         self.wallets = Wallets(self.config, self.exchange)
+        self._abort_on_unknown_open_positions()
 
         PairLocks.timeframe = self.config["timeframe"]
 
@@ -190,6 +192,29 @@ class FreqtradeBot(LoggingMixin):
             )
 
         self._measure_execution = MeasureTime(log_took_too_long, timeframe_secs * 0.25)
+
+    def _abort_on_unknown_open_positions(self) -> None:
+        """
+        Startup guard: Abort if there are open futures positions on the exchange which are not
+        present as open trades in the DB.
+        """
+        if self.config.get("dry_run", False):
+            return
+
+        trading_mode = self.config.get("trading_mode", TradingMode.SPOT)
+        if trading_mode != TradingMode.FUTURES:
+            return
+
+        db_open_pairs = {t.pair for t in Trade.get_trades_proxy(is_open=True)}
+        open_position_pairs = set(self.wallets.get_all_positions().keys())
+
+        unknown_positions = open_position_pairs - db_open_pairs
+        if unknown_positions:
+            raise OperationalException(
+                "Startup abort: Found open exchange position(s) not tracked in DB:\n"
+                + "\n".join(sorted(unknown_positions))
+                + "\n\nClose these positions (or import them) and restart."
+            )
 
     def notify_status(self, msg: str, msg_type=RPCMessageType.STATUS) -> None:
         """
