@@ -4,8 +4,7 @@
 """
 
 import logging
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
+from datetime import datetime, timezone
 
 import ccxt
 from pandas import DataFrame
@@ -16,9 +15,8 @@ from freqtrade.exceptions import DDosProtection, OperationalException, Temporary
 from freqtrade.exchange import Exchange
 from freqtrade.exchange.common import retrier
 from freqtrade.exchange.exchange_types import FtHas, Tickers
-from freqtrade.exchange.exchange_utils_timeframe import timeframe_to_msecs
-from freqtrade.misc import deep_merge_dicts, json_load
-from freqtrade.util.datetime_helpers import dt_from_ts, dt_ts
+from freqtrade.misc import deep_merge_dicts
+from freqtrade.util.datetime_helpers import dt_from_ts
 
 
 logger = logging.getLogger(__name__)
@@ -104,78 +102,54 @@ class Aster(Exchange):
             tickers = deep_merge_dicts(bidsasks, tickers, allow_null_overrides=False)
         return tickers
 
-    # TODO: THis was a like for like replcament using Binance but could not find the specific endpoints
-    # @retrier
-    # def additional_exchange_init(self) -> None:
-    #     """
-    #     Additional exchange initialization logic.
-    #     .api will be available at this point.
-    #     Must be overridden in child methods if required.
-    #     """
-    #     try:
-    #         if self.trading_mode == TradingMode.FUTURES and not self._config["dry_run"]:
-    #             # Aster-specific futures initialization
-    #             # Note: Replace these API calls with Aster-specific equivalents
-    #             position_side = self._api.fapiPrivateGetPositionSideDual()
-    #             # self._log_exchange_response("position_side_setting", position_side)
-    #             # assets_margin = self._api.fapiPrivateGetMultiAssetsMargin()
-    #             # self._log_exchange_response("multi_asset_margin", assets_margin)
-    #             msg = ""
-    #             # if position_side.get("dualSidePosition") is True:
-    #             #     msg += (
-    #             #         "\nHedge Mode is not supported by freqtrade. "
-    #             #         "Please change 'Position Mode' on your aster futures account."
-    #             #     )
-    #             # if (
-    #             #     assets_margin.get("multiAssetsMargin") is True
-    #             #     and self.margin_mode != MarginMode.CROSS
-    #             # ):
-    #             #     msg += (
-    #             #         "\nMulti-Asset Mode is not supported by freqtrade. "
-    #             #         "Please change 'Asset Mode' on your aster futures account."
-    #             #     )
-    #             if msg:
-    #                 raise OperationalException(msg)
-    #     except ccxt.DDoSProtection as e:
-    #         raise DDosProtection(e) from e
-    #     except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
-    #         raise TemporaryError(
-    #             f"Error in additional_exchange_init due to {e.__class__.__name__}. Message: {e}"
-    #         ) from e
+    @retrier
+    def additional_exchange_init(self) -> None:
+        """
+        Additional exchange initialization logic.
 
-    #     except ccxt.BaseError as e:
-    #         raise OperationalException(e) from e
-    #
-    # @retrier
-    # def additional_exchange_init(self) -> None:
-    #     """
-    #     Additional exchange initialization logic.
-    #     .api will be available at this point.
-    #     Must be overridden in child methods if required.
-    #     """
-    #     try:
-    #         if not self._config["dry_run"]:
-    #             if self.trading_mode == TradingMode.FUTURES:
-    #                 position_mode = self._api.set_position_mode(False)
-    #                 self._log_exchange_response("set_position_mode", position_mode)
-    #             is_unified = self._api.is_unified_enabled()
-    #             # Returns a tuple of bools, first for margin, second for Account
-    #             if is_unified and len(is_unified) > 1 and is_unified[1]:
-    #                 self.unified_account = True
-    #                 logger.info(
-    #                     "Bybit: Unified account. Assuming dedicated subaccount for this bot."
-    #                 )
-    #             else:
-    #                 self.unified_account = False
-    #                 logger.info("Bybit: Standard account.")
-    #     except ccxt.DDoSProtection as e:
-    #         raise DDosProtection(e) from e
-    #     except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
-    #         raise TemporaryError(
-    #             f"Error in additional_exchange_init due to {e.__class__.__name__}. Message: {e}"
-    #         ) from e
-    #     except ccxt.BaseError as e:
-    #         raise OperationalException(e) from e
+        Enforce one-way (non-hedged) position mode for futures.
+        Uses CCXT unified methods: fetch_position_mode / set_position_mode.
+        """
+        try:
+            if self._config["dry_run"] or self.trading_mode != TradingMode.FUTURES:
+                return
+
+            self._ensure_one_way_mode()
+
+        except ccxt.DDoSProtection as e:
+            raise DDosProtection(e) from e
+        except (ccxt.OperationFailed, ccxt.ExchangeError) as e:
+            raise TemporaryError(
+                f"Error in additional_exchange_init due to {e.__class__.__name__}. Message: {e}"
+            ) from e
+        except ccxt.BaseError as e:
+            raise OperationalException(e) from e
+
+    def _ensure_one_way_mode(self) -> None:
+        """
+        Ensure futures account is in one-way (non-hedged) position mode.
+        """
+        position_mode = self._api.fetch_position_mode()
+        self._log_exchange_response("fetch_position_mode", position_mode)
+
+        if position_mode.get("hedged") is not True:
+            return
+
+        logger.warning(
+            "Aster: Account is in hedge mode (dualSidePosition=true). "
+            "Freqtrade futures requires one-way mode. Attempting to switch to one-way."
+        )
+        res = self._api.set_position_mode(False)
+        self._log_exchange_response("set_position_mode", res)
+
+        position_mode = self._api.fetch_position_mode()
+        self._log_exchange_response("fetch_position_mode_after_set", position_mode)
+        if position_mode.get("hedged") is True:
+            raise OperationalException(
+                "Aster futures account is in hedge mode (dualSidePosition=true). "
+                "Freqtrade requires one-way mode. Please switch Position Mode to One-way "
+                "in the Aster UI (or via API) and restart the bot."
+            )
 
     def get_historic_ohlcv(
         self,
