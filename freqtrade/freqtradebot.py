@@ -206,7 +206,10 @@ class FreqtradeBot(LoggingMixin):
             return
 
         db_open_pairs = {t.pair for t in Trade.get_trades_proxy(is_open=True)}
-        open_position_pairs = set(self.wallets.get_all_positions().keys())
+        # Only consider *actually open* positions.
+        # Some exchanges may return "position" entries with 0 contracts but non-zero collateral/metadata.
+        open_position_pairs = {pair for pair, pos in self.wallets.get_all_positions().items() if pos.position != 0}
+
 
         unknown_positions = open_position_pairs - db_open_pairs
         if unknown_positions:

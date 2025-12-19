@@ -1,14 +1,13 @@
 """Mode exchange subclass"""
 
 import logging
-from copy import deepcopy
-from decimal import Decimal
+from typing import Any
 
 import ccxt
 from freqtrade.enums.marginmode import MarginMode
 from freqtrade.enums.tradingmode import TradingMode
 from freqtrade.exchange import Exchange
-from freqtrade.exchange.exchange_types import CcxtBalances, FtHas
+from freqtrade.exchange.exchange_types import FtHas
 from freqtrade.exchange.common import retrier
 from freqtrade.exceptions import (
     DDosProtection,
@@ -47,6 +46,194 @@ class Modetrade(Exchange):
         # "trades_has_history": False,  # Endpoint doesn"t have a "since" parameter
         # "ws_enabled": True,
     }
+
+    def _modetrade_price_sanity_cfg(self) -> dict[str, Any]:
+        cfg = {}
+        if isinstance(self._config, dict):
+            # New generic key (preferred)
+            cfg = self._config.get("price_sanity_check_settings", {}) or {}
+            # Backward-compatible key (older configs)
+            if not cfg:
+                cfg = self._config.get("modetrade_price_sanity", {}) or {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        return {
+            "enabled": bool(cfg.get("enabled", True)),
+            "max_deviation_ratio": float(cfg.get("max_deviation_ratio", 0.03)),
+            "log_level": str(cfg.get("log_level", "warning")).lower(),
+        }
+
+    @staticmethod
+    def _rel_deviation(a: float, b: float) -> float:
+        """Relative deviation |a-b|/|b| (b as reference)."""
+        if b == 0:
+            return float("inf")
+        return abs(a - b) / abs(b)
+
+    def _fetch_last_trade_price(self, pair: str) -> tuple[float | None, str | None]:
+        try:
+            trades = self._api.fetch_trades(pair, limit=10)
+            if not trades:
+                return None, None
+            # CCXT does not guarantee ordering, so pick the newest by timestamp.
+            newest = max(
+                (t for t in trades if isinstance(t, dict) and t.get("price") is not None),
+                key=lambda t: t.get("timestamp") or 0,
+                default=None,
+            )
+            if not newest:
+                return None, None
+            return float(newest["price"]), None
+        except Exception as e:
+            return None, str(e)
+
+    def _fetch_last_ohlcv_close(self, pair: str) -> tuple[float | None, str | None]:
+        try:
+            ohlcv = self._api.fetch_ohlcv(pair, timeframe="1m", limit=2)
+            if not ohlcv:
+                return None, None
+            last = ohlcv[-1]
+            # [timestamp, open, high, low, close, volume]
+            if isinstance(last, (list, tuple)) and len(last) >= 5 and last[4] is not None:
+                return float(last[4]), None
+            return None, None
+        except Exception as e:
+            return None, str(e)
+
+    @staticmethod
+    def _ticker_ref(ticker: Any | None) -> tuple[float | None, float | None]:
+        """
+        Extract (index_price, mark_price) from a CCXT ticker.
+        We store these under ticker["info"]["index_price"/"mark_price"] in our CCXT adapter.
+        """
+        if not isinstance(ticker, dict):
+            return None, None
+        info = ticker.get("info")
+        if not isinstance(info, dict):
+            return None, None
+        idx = info.get("index_price")
+        mark = info.get("mark_price")
+        try:
+            idx = float(idx) if idx is not None else None
+        except Exception:
+            idx = None
+        try:
+            mark = float(mark) if mark is not None else None
+        except Exception:
+            mark = None
+        return idx, mark
+
+    @staticmethod
+    def _ob_top(order_book: Any | None) -> tuple[float | None, float | None]:
+        """
+        Extract top-of-book bid/ask (best bid, best ask) from a ccxt-style orderbook dict.
+        """
+        if not isinstance(order_book, dict):
+            return None, None
+        bid = ask = None
+        bids = order_book.get("bids")
+        asks = order_book.get("asks")
+        if isinstance(bids, list) and bids:
+            try:
+                bid = float(bids[0][0])
+            except Exception:
+                bid = None
+        if isinstance(asks, list) and asks:
+            try:
+                ask = float(asks[0][0])
+            except Exception:
+                ask = None
+        return bid, ask
+
+    def get_rate(
+        self,
+        pair: str,
+        refresh: bool,
+        side: str,
+        is_short: bool,
+        order_book: Any | None = None,
+        ticker: Any | None = None,
+    ) -> float:
+        """
+        ModeTrade can occasionally return a spiky/stale orderbook snapshot, which can make
+        stoploss/trailing logic and notifications use a wrong `current_rate`.
+
+        Minimal sanity guard:
+        - compare `base_rate` vs a forced-refresh rate
+        - only if they differ too much, compare to index/mark from ticker
+        - last_close is only used as a last resort
+        """
+        cfg = self._modetrade_price_sanity_cfg()
+        if not cfg["enabled"]:
+            return super().get_rate(pair, refresh, side, is_short, order_book=order_book, ticker=ticker)
+
+        max_dev = cfg["max_deviation_ratio"]
+        log_level = cfg["log_level"]
+
+        ob_bid, ob_ask = self._ob_top(order_book)
+        base_rate = super().get_rate(pair, refresh, side, is_short, order_book=order_book, ticker=ticker)
+
+        refreshed_rate = base_rate
+        if not refresh:
+            refreshed_rate = super().get_rate(pair, True, side, is_short, order_book=None, ticker=None)
+
+        dev_base_refreshed = self._rel_deviation(base_rate, refreshed_rate)
+        if dev_base_refreshed <= max_dev:
+            return refreshed_rate
+
+        action = "fallback_no_ref"
+        chosen_rate = float(refreshed_rate)
+
+        ref_err: str | None = None
+        idx: float | None = None
+        mark: float | None = None
+        last_close: float | None = None
+        ohlcv_err: str | None = None
+        try:
+            t = ticker if isinstance(ticker, dict) else None
+            if t is None:
+                t = self._api.fetch_ticker(pair)
+            idx, mark = self._ticker_ref(t)
+        except Exception as e:
+            ref_err = str(e)
+
+        ref = idx if isinstance(idx, (int, float)) else mark
+        if isinstance(ref, (int, float)):
+            dev_refreshed_ref = self._rel_deviation(refreshed_rate, ref)
+            dev_base_ref = self._rel_deviation(base_rate, ref)
+            if dev_refreshed_ref <= max_dev:
+                action = "accept_refreshed"
+                chosen_rate = float(refreshed_rate)
+                try:
+                    cache_rate = self._entry_rate_cache if side == "entry" else self._exit_rate_cache
+                    with self._cache_lock:
+                        cache_rate[pair] = chosen_rate
+                except Exception:
+                    pass
+            elif dev_base_ref <= max_dev:
+                action = "accept_base"
+                chosen_rate = float(base_rate)
+            else:
+                action = "use_index" if idx is not None else "use_mark"
+                chosen_rate = float(ref)
+        else:
+            last_close, ohlcv_err = self._fetch_last_ohlcv_close(pair)
+            if last_close is not None:
+                action = "use_last_close"
+                chosen_rate = float(last_close)
+            else:
+                action = "fallback_failed"
+
+        msg = (
+            "ModeTrade price sanity check "
+            f"action={action} pair={pair} side={side} short={bool(is_short)} "
+            f"base={base_rate:.8f} refreshed={refreshed_rate:.8f} "
+            f"index={idx} mark={mark} close={last_close} "
+            f"ob_bid={ob_bid} ob_ask={ob_ask} dev_base_refreshed={dev_base_refreshed:.4%} "
+            f"max_dev={max_dev} ref_err={ref_err} ohlcv_err={ohlcv_err}"
+        )
+        getattr(logger, log_level, logger.warning)(msg)
+        return chosen_rate
 
     # TODO: This is a spoofed with Binance data.
     # Ask Orderly how to get.
@@ -99,20 +286,6 @@ class Modetrade(Exchange):
         #     if not self.exchange_has("createMarketOrder"):
         #         raise ConfigurationError(f"Exchange {self.name} does not support market orders.")
         self.validate_stop_ordertypes(order_types)
-
-    # @retrier
-    # def get_balances(self) -> CcxtBalances:
-    #     """
-    #     Override the default get_balances to add values for "free" and "used"
-    #     """
-    #     balances = super().get_balances()
-    #     new_balances = deepcopy(balances)
-    #     for token, balance in balances.items():
-    #         if balance["free"] is None:
-    #             new_balances[token]["frozen"] = float(balance["frozen"])
-    #             new_balances[token]["free"] = float(Decimal(balance["total"]) - Decimal(balance["frozen"]))
-    #             new_balances[token]["used"] = float(balance["frozen"])
-    #     return new_balances
 
     @retrier
     def additional_exchange_init(self) -> None:
