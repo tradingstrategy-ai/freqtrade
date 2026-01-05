@@ -156,55 +156,66 @@ class Modetrade(Exchange):
     ) -> float:
         """
         Get rate with sanity check for thin liquidity markets.
-        
+
         For market orders, compares order book price against mark/index.
         Uses order book when reasonable, falls back to mark/index for outliers.
         This prevents false stoploss triggers from spiky order book data.
+
+        This method is called during startup and must never raise
+        exceptions or it will crash the worker.
         """
         cfg = self._modetrade_price_sanity_cfg()
         if not cfg["enabled"]:
             return super().get_rate(pair, refresh, side, is_short, order_book=order_book, ticker=ticker)
 
-        # Get fresh order book price
-        ob_rate = super().get_rate(pair, True, side, is_short, order_book=None, ticker=None)
-        
-        # Get mark/index reference
-        idx, mark, ref_err = self._get_reference_price(pair, ticker)
-        ref_price = idx if idx is not None else mark
-        
-        # Determine which price to use
-        if ref_price is not None:
-            deviation = self._rel_deviation(ob_rate, ref_price)
-            max_dev = cfg["max_deviation_ratio"]
-            
-            if deviation <= max_dev:
-                chosen_rate = ob_rate
-                action = "use_orderbook"
+        try:
+            # Get fresh order book price
+            ob_rate = super().get_rate(pair, True, side, is_short, order_book=None, ticker=None)
+
+            # Get mark/index reference
+            idx, mark, ref_err = self._get_reference_price(pair, ticker)
+            ref_price = idx if idx is not None else mark
+
+            # Determine which price to use
+            if ref_price is not None:
+                deviation = self._rel_deviation(ob_rate, ref_price)
+                max_dev = cfg["max_deviation_ratio"]
+
+                if deviation <= max_dev:
+                    chosen_rate = ob_rate
+                    action = "use_orderbook"
+                else:
+                    chosen_rate = ref_price
+                    action = f"use_{'index' if idx is not None else 'mark'}"
             else:
-                chosen_rate = ref_price
-                action = f"use_{'index' if idx is not None else 'mark'}"
-        else:
-            chosen_rate = ob_rate
-            action = "use_orderbook_no_ref"
-            deviation = None
-        
-        # Log decision
-        self._log_price_decision({
-            "pair": pair,
-            "side": side,
-            "is_short": is_short,
-            "ob_rate": ob_rate,
-            "idx": idx,
-            "mark": mark,
-            "chosen_rate": chosen_rate,
-            "action": action,
-            "deviation": deviation,
-            "max_dev": cfg["max_deviation_ratio"],
-            "ref_err": ref_err,
-            "log_level": cfg["log_level"],
-        })
-        
-        return chosen_rate
+                chosen_rate = ob_rate
+                action = "use_orderbook_no_ref"
+                deviation = None
+
+            # Log decision (wrapped to prevent logging errors from crashing)
+            try:
+                self._log_price_decision({
+                    "pair": pair,
+                    "side": side,
+                    "is_short": is_short,
+                    "ob_rate": ob_rate,
+                    "idx": idx,
+                    "mark": mark,
+                    "chosen_rate": chosen_rate,
+                    "action": action,
+                    "deviation": deviation,
+                    "max_dev": cfg["max_deviation_ratio"],
+                    "ref_err": ref_err,
+                    "log_level": cfg["log_level"],
+                })
+            except Exception as log_err:
+                logger.warning(f"Failed to log price decision for {pair}: {log_err}")
+
+            return chosen_rate
+
+        except Exception as e:
+            logger.warning(f"ModeTrade get_rate failed for {pair}: {type(e).__name__}: {e}. Using fallback.")
+            return super().get_rate(pair, refresh, side, is_short, order_book=order_book, ticker=ticker)
 
     def _get_reference_price(
         self, pair: str, ticker: Any | None
