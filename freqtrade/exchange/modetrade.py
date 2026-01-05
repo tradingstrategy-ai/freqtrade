@@ -155,85 +155,86 @@ class Modetrade(Exchange):
         ticker: Any | None = None,
     ) -> float:
         """
-        ModeTrade can occasionally return a spiky/stale orderbook snapshot, which can make
-        stoploss/trailing logic and notifications use a wrong `current_rate`.
-
-        Minimal sanity guard:
-        - compare `base_rate` vs a forced-refresh rate
-        - only if they differ too much, compare to index/mark from ticker
-        - last_close is only used as a last resort
+        Get rate with sanity check for thin liquidity markets.
+        
+        For market orders, compares order book price against mark/index.
+        Uses order book when reasonable, falls back to mark/index for outliers.
+        This prevents false stoploss triggers from spiky order book data.
         """
         cfg = self._modetrade_price_sanity_cfg()
         if not cfg["enabled"]:
             return super().get_rate(pair, refresh, side, is_short, order_book=order_book, ticker=ticker)
 
-        max_dev = cfg["max_deviation_ratio"]
-        log_level = cfg["log_level"]
-
-        ob_bid, ob_ask = self._ob_top(order_book)
-        base_rate = super().get_rate(pair, refresh, side, is_short, order_book=order_book, ticker=ticker)
-
-        refreshed_rate = base_rate
-        if not refresh:
-            refreshed_rate = super().get_rate(pair, True, side, is_short, order_book=None, ticker=None)
-
-        dev_base_refreshed = self._rel_deviation(base_rate, refreshed_rate)
-        if dev_base_refreshed <= max_dev:
-            return refreshed_rate
-
-        action = "fallback_no_ref"
-        chosen_rate = float(refreshed_rate)
-
-        ref_err: str | None = None
-        idx: float | None = None
-        mark: float | None = None
-        last_close: float | None = None
-        ohlcv_err: str | None = None
-        try:
-            t = ticker if isinstance(ticker, dict) else None
-            if t is None:
-                t = self._api.fetch_ticker(pair)
-            idx, mark = self._ticker_ref(t)
-        except Exception as e:
-            ref_err = str(e)
-
-        ref = idx if isinstance(idx, (int, float)) else mark
-        if isinstance(ref, (int, float)):
-            dev_refreshed_ref = self._rel_deviation(refreshed_rate, ref)
-            dev_base_ref = self._rel_deviation(base_rate, ref)
-            if dev_refreshed_ref <= max_dev:
-                action = "accept_refreshed"
-                chosen_rate = float(refreshed_rate)
-                try:
-                    cache_rate = self._entry_rate_cache if side == "entry" else self._exit_rate_cache
-                    with self._cache_lock:
-                        cache_rate[pair] = chosen_rate
-                except Exception:
-                    pass
-            elif dev_base_ref <= max_dev:
-                action = "accept_base"
-                chosen_rate = float(base_rate)
+        # Get fresh order book price
+        ob_rate = super().get_rate(pair, True, side, is_short, order_book=None, ticker=None)
+        
+        # Get mark/index reference
+        idx, mark, ref_err = self._get_reference_price(pair, ticker)
+        ref_price = idx if idx is not None else mark
+        
+        # Determine which price to use
+        if ref_price is not None:
+            deviation = self._rel_deviation(ob_rate, ref_price)
+            max_dev = cfg["max_deviation_ratio"]
+            
+            if deviation <= max_dev:
+                chosen_rate = ob_rate
+                action = "use_orderbook"
             else:
-                action = "use_index" if idx is not None else "use_mark"
-                chosen_rate = float(ref)
+                chosen_rate = ref_price
+                action = f"use_{'index' if idx is not None else 'mark'}"
         else:
-            last_close, ohlcv_err = self._fetch_last_ohlcv_close(pair)
-            if last_close is not None:
-                action = "use_last_close"
-                chosen_rate = float(last_close)
-            else:
-                action = "fallback_failed"
-
-        msg = (
-            "ModeTrade price sanity check "
-            f"action={action} pair={pair} side={side} short={bool(is_short)} "
-            f"base={base_rate:.8f} refreshed={refreshed_rate:.8f} "
-            f"index={idx} mark={mark} close={last_close} "
-            f"ob_bid={ob_bid} ob_ask={ob_ask} dev_base_refreshed={dev_base_refreshed:.4%} "
-            f"max_dev={max_dev} ref_err={ref_err} ohlcv_err={ohlcv_err}"
-        )
-        getattr(logger, log_level, logger.warning)(msg)
+            chosen_rate = ob_rate
+            action = "use_orderbook_no_ref"
+            deviation = None
+        
+        # Log decision
+        self._log_price_decision({
+            "pair": pair,
+            "side": side,
+            "is_short": is_short,
+            "ob_rate": ob_rate,
+            "idx": idx,
+            "mark": mark,
+            "chosen_rate": chosen_rate,
+            "action": action,
+            "deviation": deviation,
+            "max_dev": cfg["max_deviation_ratio"],
+            "ref_err": ref_err,
+            "log_level": cfg["log_level"],
+        })
+        
         return chosen_rate
+
+    def _get_reference_price(
+        self, pair: str, ticker: Any | None
+    ) -> tuple[float | None, float | None, str | None]:
+        """Fetch index and mark prices, return (index, mark, error)."""
+        try:
+            t = ticker if isinstance(ticker, dict) else self._api.fetch_ticker(pair)
+            idx, mark = self._ticker_ref(t)
+            return idx, mark, None
+        except Exception as e:
+            return None, None, str(e)
+
+    def _log_price_decision(self, data: dict[str, Any]) -> None:
+        """Log price sanity check decision."""
+        dev_str = f"{data['deviation']:.2%}" if data['deviation'] is not None else "N/A"
+        idx_str = f"{data['idx']:.6f}" if data['idx'] is not None else "N/A"
+        mark_str = f"{data['mark']:.6f}" if data['mark'] is not None else "N/A"
+        
+        msg = (
+            f"ModeTrade price check: {data['action']} | "
+            f"pair={data['pair']} side={data['side']} short={data['is_short']} | "
+            f"ob={data['ob_rate']:.6f} idx={idx_str} "
+            f"mark={mark_str} → chose={data['chosen_rate']:.6f} | "
+            f"dev={dev_str} max={data['max_dev']:.1%}"
+        )
+        
+        if data['ref_err']:
+            msg += f" | ref_err={data['ref_err']}"
+        
+        getattr(logger, data['log_level'], logger.warning)(msg)
 
     # TODO: This is a spoofed with Binance data.
     # Ask Orderly how to get.
