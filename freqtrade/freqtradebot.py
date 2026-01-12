@@ -1382,6 +1382,7 @@ class FreqtradeBot(LoggingMixin):
         exit_rate = self.exchange.get_rate(
             trade.pair, side="exit", is_short=trade.is_short, refresh=True
         )
+
         if self._check_and_execute_exit(trade, exit_rate, enter, exit_, exit_tag):
             return True
 

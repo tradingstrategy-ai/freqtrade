@@ -1,13 +1,13 @@
 """Mode exchange subclass"""
 
 import logging
-from typing import Any
+from typing import Any, Dict, Optional, Set
 
 import ccxt
 from freqtrade.enums.marginmode import MarginMode
 from freqtrade.enums.tradingmode import TradingMode
 from freqtrade.exchange import Exchange
-from freqtrade.exchange.exchange_types import FtHas
+from freqtrade.exchange.exchange_types import FtHas, Ticker, OrderBook
 from freqtrade.exchange.common import retrier
 from freqtrade.exceptions import (
     DDosProtection,
@@ -46,6 +46,19 @@ class Modetrade(Exchange):
         # "trades_has_history": False,  # Endpoint doesn"t have a "since" parameter
         # "ws_enabled": True,
     }
+
+    def __init__(self, config: Dict[str, Any], *, validate: bool = True, **kwargs) -> None:
+        """Initialize ModeTrade exchange with delisting detection."""
+        super().__init__(config, validate=validate, **kwargs)
+        # Track BadSymbol failures per pair for delisting detection
+        self._bad_symbol_count: Dict[str, int] = {}
+        self._delisted_pairs: Set[str] = set()
+        # Mark pair as delisted after N consecutive BadSymbol failures
+        self._bad_symbol_threshold = 3
+        logger.info(
+            f"ModeTrade delisting detection enabled "
+            f"(threshold: {self._bad_symbol_threshold} failures)"
+        )
 
     def _modetrade_price_sanity_cfg(self) -> dict[str, Any]:
         cfg = {}
@@ -161,61 +174,76 @@ class Modetrade(Exchange):
         Uses order book when reasonable, falls back to mark/index for outliers.
         This prevents false stoploss triggers from spiky order book data.
 
-        This method is called during startup and must never raise
-        exceptions or it will crash the worker.
+        Also handles delisted pairs by falling back to ticker pricing.
         """
+        # If pair is marked as delisted, skip order book and use ticker only
+        if pair in self._delisted_pairs:
+            logger.warning(
+                f"Pair {pair} is delisted. Using ticker pricing instead of order book."
+            )
+            if ticker is None:
+                ticker = self.fetch_ticker(pair)
+            # Use ticker-only pricing by disabling order book
+            return super().get_rate(pair, refresh, side, is_short, order_book=None, ticker=ticker)
+
         cfg = self._modetrade_price_sanity_cfg()
         if not cfg["enabled"]:
             return super().get_rate(pair, refresh, side, is_short, order_book=order_book, ticker=ticker)
 
+        # Get fresh order book price
+        # This may raise DDosProtection if pair is delisted (caught by fetch_l2_order_book)
         try:
-            # Get fresh order book price
             ob_rate = super().get_rate(pair, True, side, is_short, order_book=None, ticker=None)
-
-            # Get mark/index reference
-            idx, mark, ref_err = self._get_reference_price(pair, ticker)
-            ref_price = idx if idx is not None else mark
-
-            # Determine which price to use
-            if ref_price is not None:
-                deviation = self._rel_deviation(ob_rate, ref_price)
-                max_dev = cfg["max_deviation_ratio"]
-
-                if deviation <= max_dev:
-                    chosen_rate = ob_rate
-                    action = "use_orderbook"
-                else:
-                    chosen_rate = ref_price
-                    action = f"use_{'index' if idx is not None else 'mark'}"
-            else:
+        except DDosProtection as e:
+            if "delisted" in str(e).lower():
+                # Pair just got marked as delisted - use ticker fallback
+                logger.warning(
+                    f"Pair {pair} marked as delisted during get_rate. "
+                    f"Falling back to ticker pricing."
+                )
+                if ticker is None:
+                    ticker = self.fetch_ticker(pair)
+                # Use ticker-only pricing
+                return super().get_rate(pair, refresh, side, is_short, order_book=None, ticker=ticker)
+            raise
+        
+        # Get mark/index reference
+        idx, mark, ref_err = self._get_reference_price(pair, ticker)
+        ref_price = idx if idx is not None else mark
+        
+        # Determine which price to use
+        if ref_price is not None:
+            deviation = self._rel_deviation(ob_rate, ref_price)
+            max_dev = cfg["max_deviation_ratio"]
+            
+            if deviation <= max_dev:
                 chosen_rate = ob_rate
-                action = "use_orderbook_no_ref"
-                deviation = None
-
-            # Log decision (wrapped to prevent logging errors from crashing)
-            try:
-                self._log_price_decision({
-                    "pair": pair,
-                    "side": side,
-                    "is_short": is_short,
-                    "ob_rate": ob_rate,
-                    "idx": idx,
-                    "mark": mark,
-                    "chosen_rate": chosen_rate,
-                    "action": action,
-                    "deviation": deviation,
-                    "max_dev": cfg["max_deviation_ratio"],
-                    "ref_err": ref_err,
-                    "log_level": cfg["log_level"],
-                })
-            except Exception as log_err:
-                logger.warning(f"Failed to log price decision for {pair}: {log_err}")
-
-            return chosen_rate
-
-        except Exception as e:
-            logger.warning(f"ModeTrade get_rate failed for {pair}: {type(e).__name__}: {e}. Using fallback.")
-            return super().get_rate(pair, refresh, side, is_short, order_book=order_book, ticker=ticker)
+                action = "use_orderbook"
+            else:
+                chosen_rate = ref_price
+                action = f"use_{'index' if idx is not None else 'mark'}"
+        else:
+            chosen_rate = ob_rate
+            action = "use_orderbook_no_ref"
+            deviation = None
+        
+        # Log decision
+        self._log_price_decision({
+            "pair": pair,
+            "side": side,
+            "is_short": is_short,
+            "ob_rate": ob_rate,
+            "idx": idx,
+            "mark": mark,
+            "chosen_rate": chosen_rate,
+            "action": action,
+            "deviation": deviation,
+            "max_dev": cfg["max_deviation_ratio"],
+            "ref_err": ref_err,
+            "log_level": cfg["log_level"],
+        })
+        
+        return chosen_rate
 
     def _get_reference_price(
         self, pair: str, ticker: Any | None
@@ -337,6 +365,96 @@ class Modetrade(Exchange):
             ) from e
         except ccxt.BaseError as e:
             raise OperationalException(e) from e
+
+    def fetch_l2_order_book(self, pair: str, limit: int = 100) -> OrderBook:
+        """
+        Override to track BadSymbol errors and detect delisted pairs.
+
+        After N consecutive BadSymbol failures, marks the pair as delisted
+        and raises DDosProtection to trigger emergency handling.
+        """
+        # If already marked as delisted, raise immediately with clear message
+        if pair in self._delisted_pairs:
+            logger.warning(
+                f"Skipping {pair} - already marked as delisted. "
+                f"Add to pair_blacklist in config to silence this warning."
+            )
+            raise DDosProtection(
+                f"Pair {pair} has been delisted from exchange. "
+                f"Add to blacklist to remove from trading."
+            )
+
+        try:
+            order_book = super().fetch_l2_order_book(pair, limit)
+            # Success - reset failure count for this pair
+            self._bad_symbol_count.pop(pair, None)
+            return order_book
+
+        except TemporaryError as e:
+            # Check if this was caused by BadSymbol
+            is_bad_symbol = (
+                isinstance(e.__cause__, ccxt.BadSymbol) or
+                "BadSymbol" in str(e) or
+                "does not have market symbol" in str(e)
+            )
+
+            if is_bad_symbol:
+                # Track consecutive BadSymbol failures
+                self._bad_symbol_count[pair] = self._bad_symbol_count.get(pair, 0) + 1
+                failure_count = self._bad_symbol_count[pair]
+
+                if failure_count >= self._bad_symbol_threshold:
+                    # Mark as delisted
+                    self._delisted_pairs.add(pair)
+
+                    # Add to runtime blacklist to prevent new entries
+                    # This does NOT modify the config file - only in-memory blacklist
+                    added_to_blacklist = False
+                    if pair not in self._config.get("exchange", {}).get("pair_blacklist", []):
+                        if "exchange" not in self._config:
+                            self._config["exchange"] = {}
+                        if "pair_blacklist" not in self._config["exchange"]:
+                            self._config["exchange"]["pair_blacklist"] = []
+
+                        self._config["exchange"]["pair_blacklist"].append(pair)
+                        added_to_blacklist = True
+                        logger.info(
+                            f"✓ Added {pair} to runtime pair_blacklist (in-memory only, "
+                            f"not saved to config file)"
+                        )
+
+                    # Log clear actionable message
+                    if added_to_blacklist:
+                        logger.error(
+                            f"⚠️  PAIR DELISTED: {pair} failed with BadSymbol {failure_count} times. "
+                            f"This pair appears to be delisted from the exchange. "
+                            f"Automatically added to runtime blacklist. "
+                            f"RECOMMENDED: Add '{pair}' to pair_blacklist in your config file for persistence."
+                        )
+                    else:
+                        logger.error(
+                            f"⚠️  PAIR DELISTED: {pair} failed with BadSymbol {failure_count} times. "
+                            f"This pair appears to be delisted from the exchange. "
+                            f"Pair already in blacklist - no new entry attempts will be made."
+                        )
+
+                    # Raise DDosProtection to prevent infinite retry loop
+                    # This stops the bot from continuing to hammer this pair
+                    raise DDosProtection(
+                        f"Pair {pair} has been delisted from exchange "
+                        f"(BadSymbol threshold {self._bad_symbol_threshold} reached)"
+                    ) from e
+                else:
+                    # Still tracking, log progress
+                    logger.warning(
+                        f"BadSymbol error for {pair} ({failure_count}/{self._bad_symbol_threshold}). "
+                        f"Will mark as delisted if this continues."
+                    )
+                    # Re-raise for retry
+                    raise
+            else:
+                # Not a BadSymbol error, just re-raise
+                raise
 
     @retrier
     def _set_leverage(

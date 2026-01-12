@@ -271,5 +271,101 @@ class TestModeTradePriceSanity:
         assert dev <= 0.03  # Within threshold, use OB
 
 
+class TestModeTradeDelistingDetection:
+    """Test ModeTrade delisting detection logic"""
+
+    def test_badsymbol_tracking_increments(self):
+        """Test that BadSymbol failures are tracked correctly"""
+        import ccxt
+        from unittest.mock import patch
+        from freqtrade.exceptions import TemporaryError, DDosProtection
+
+        # Create mock exchange instance
+        modetrade = Modetrade({'name': 'modetrade', 'dry_run': True})
+        test_pair = "AVNT/USDC:USDC"
+
+        # Initially should be empty
+        assert test_pair not in modetrade._bad_symbol_count
+        assert test_pair not in modetrade._delisted_pairs
+
+        # Create a function that returns a new TemporaryError each time (needed for multiple raises)
+        def create_temp_error():
+            bad_symbol_error = ccxt.BadSymbol(f"modetrade does not have market symbol {test_pair}")
+            temp_error = TemporaryError(f"Could not get order book due to BadSymbol. Message: {bad_symbol_error}")
+            temp_error.__cause__ = bad_symbol_error
+            return temp_error
+
+        # Mock parent's fetch_l2_order_book to raise TemporaryError with BadSymbol cause
+        with patch.object(
+            Modetrade.__bases__[0], 'fetch_l2_order_book',
+            side_effect=lambda pair, limit=None: (_ for _ in ()).throw(create_temp_error())
+        ):
+            # Attempt 1 - should raise TemporaryError and increment count
+            with pytest.raises(TemporaryError):
+                modetrade.fetch_l2_order_book(test_pair)
+            assert modetrade._bad_symbol_count[test_pair] == 1
+            assert test_pair not in modetrade._delisted_pairs
+
+            # Attempt 2 - should raise TemporaryError and increment count
+            with pytest.raises(TemporaryError):
+                modetrade.fetch_l2_order_book(test_pair)
+            assert modetrade._bad_symbol_count[test_pair] == 2
+            assert test_pair not in modetrade._delisted_pairs
+
+            # Attempt 3 - should mark as delisted and raise DDosProtection
+            with pytest.raises(DDosProtection) as exc_info:
+                modetrade.fetch_l2_order_book(test_pair)
+            assert modetrade._bad_symbol_count[test_pair] == 3
+            assert test_pair in modetrade._delisted_pairs
+            assert "delisted" in str(exc_info.value).lower()
+
+    def test_delisted_pair_raises_immediately(self):
+        """Test that already-delisted pairs raise DDosProtection immediately"""
+        from freqtrade.exceptions import DDosProtection
+
+        modetrade = Modetrade({'name': 'modetrade', 'dry_run': True})
+        test_pair = "AVNT/USDC:USDC"
+
+        # Manually mark as delisted
+        modetrade._delisted_pairs.add(test_pair)
+
+        # Should raise DDosProtection immediately without calling parent
+        with pytest.raises(DDosProtection) as exc_info:
+            modetrade.fetch_l2_order_book(test_pair)
+
+        assert "delisted" in str(exc_info.value).lower()
+        # Counter should not increment (immediate raise)
+        assert test_pair not in modetrade._bad_symbol_count
+
+    def test_successful_fetch_resets_counter(self):
+        """Test that successful fetch resets the failure counter"""
+        import ccxt
+        from unittest.mock import patch
+        from freqtrade.exceptions import TemporaryError
+
+        modetrade = Modetrade({'name': 'modetrade', 'dry_run': True})
+        test_pair = "BTC/USDC:USDC"
+
+        # Fail once
+        with patch.object(
+            Modetrade.__bases__[0], 'fetch_l2_order_book',
+            side_effect=ccxt.BadSymbol("test")
+        ):
+            with pytest.raises(TemporaryError):
+                modetrade.fetch_l2_order_book(test_pair)
+            assert modetrade._bad_symbol_count[test_pair] == 1
+
+        # Success - should reset counter
+        mock_order_book = {'bids': [[100.0, 1.0]], 'asks': [[101.0, 1.0]]}
+        with patch.object(
+            Modetrade.__bases__[0], 'fetch_l2_order_book',
+            return_value=mock_order_book
+        ):
+            result = modetrade.fetch_l2_order_book(test_pair)
+            assert result == mock_order_book
+            # Counter should be removed
+            assert test_pair not in modetrade._bad_symbol_count
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
