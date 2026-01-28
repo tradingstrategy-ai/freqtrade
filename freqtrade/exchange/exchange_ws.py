@@ -40,16 +40,40 @@ class ExchangeWS:
         # Each instance has its own session/connector with a fixed local_addr
         self._ws_exchanges: dict[str, ccxt.Exchange] = {}
 
+        # IP pool statistics for debugging
+        self._ip_stats: dict[str, dict] = {}  # {ip: {active: int, failures: int, last_failure: str}}
+
         if self._ip_pool:
             self._ws_exchanges = self._create_ws_exchange_pool(ccxt_object)
-            logger.info(f"WebSocket IP pool initialized with {len(self._ws_exchanges)} exchanges")
+            # Initialize stats for each IP
+            for ip in self._ip_pool:
+                self._ip_stats[ip] = {'active': 0, 'failures': 0, 'last_failure': None}
+            logger.info(f"WebSocket IP pool initialized with {len(self._ws_exchanges)} exchanges: {self._ip_pool}")
         else:
             # No IP pool - use single exchange for everything
             self._ws_exchanges = {'default': ccxt_object}
+            self._ip_stats['default'] = {'active': 0, 'failures': 0, 'last_failure': None}
 
         self._thread = Thread(name="ccxt_ws", target=self._start_forever)
         self._thread.start()
         self.__cleanup_called = False
+
+    def _get_ip_for_exchange(self, ws_exchange: ccxt.Exchange) -> str:
+        """Reverse lookup: find which IP an exchange instance is bound to."""
+        for ip, exchange in self._ws_exchanges.items():
+            if exchange is ws_exchange:
+                return ip
+        return 'unknown'
+
+    def _log_ip_stats(self) -> None:
+        """Log current IP pool statistics."""
+        if not self._ip_pool:
+            return
+        stats_str = " | ".join(
+            f"{ip}: active={s['active']}, failures={s['failures']}"
+            for ip, s in self._ip_stats.items()
+        )
+        logger.info(f"[IP-STATS] {stats_str}")
 
     def _create_ws_exchange_pool(self, template: ccxt.Exchange) -> dict[str, ccxt.Exchange]:
         """Create dedicated CCXT exchange instances for each IP in the pool."""
@@ -89,13 +113,13 @@ class ExchangeWS:
             if self._loop.is_running():
                 self._loop.stop()
 
-    def _get_ws_exchange_for_pair(self, pair: str) -> ccxt.Exchange:
+    def _get_ws_exchange_for_pair(self, pair: str) -> tuple[ccxt.Exchange, str]:
         """
         Get the WebSocket exchange instance for a pair (round-robin assignment).
-        Returns the dedicated CCXT exchange instance for this pair's assigned IP.
+        Returns tuple of (dedicated CCXT exchange instance, IP address).
         """
         if not self._ip_pool:
-            return self._ws_exchanges.get('default', self._ccxt_object)
+            return self._ws_exchanges.get('default', self._ccxt_object), 'default'
 
         # Check if pair already has an IP assigned
         if pair not in self._ip_assignments:
@@ -107,11 +131,12 @@ class ExchangeWS:
             # Count connections on this IP
             connections_on_ip = sum(1 for ip in self._ip_assignments.values() if ip == assigned_ip)
             logger.info(
-                f"Assigned {pair} to IP {assigned_ip} "
-                f"({connections_on_ip}/75 connections on this IP)"
+                f"[IP-ASSIGN] NEW: {pair} -> IP {assigned_ip} "
+                f"({connections_on_ip} pairs on this IP)"
             )
 
-        return self._ws_exchanges[self._ip_assignments[pair]]
+        assigned_ip = self._ip_assignments[pair]
+        return self._ws_exchanges[assigned_ip], assigned_ip
 
     def cleanup(self) -> None:
         logger.debug("Cleanup called - stopping")
@@ -194,10 +219,14 @@ class ExchangeWS:
                 ip = self._ip_assignments[pair]
                 ws_exchange = self._ws_exchanges.get(ip)
                 if ws_exchange:
-                    return deepcopy(ws_exchange.ohlcvs.get(pair, {}).get(timeframe, []))
+                    data = deepcopy(ws_exchange.ohlcvs.get(pair, {}).get(timeframe, []))
+                    logger.debug(f"[WS-DATA] Read {len(data)} candles for {pair}/{timeframe} from IP {ip}")
+                    return data
             # Fallback to default/main exchange
             default_exchange = self._ws_exchanges.get('default', self._ccxt_object)
-            return deepcopy(default_exchange.ohlcvs.get(pair, {}).get(timeframe, []))
+            data = deepcopy(default_exchange.ohlcvs.get(pair, {}).get(timeframe, []))
+            logger.debug(f"[WS-DATA] Read {len(data)} candles for {pair}/{timeframe} from default exchange")
+            return data
         except RuntimeError as e:
             # Capture runtime errors and retry
             # TemporaryError does not cause backoff - so we're essentially retrying immediately
@@ -231,10 +260,19 @@ class ExchangeWS:
                 pair, timeframe, candle_type = p
 
                 # Get the dedicated exchange instance for this pair
-                ws_exchange = self._get_ws_exchange_for_pair(pair)
+                ws_exchange, assigned_ip = self._get_ws_exchange_for_pair(pair)
+
+                # Track active connections per IP
+                if assigned_ip in self._ip_stats:
+                    self._ip_stats[assigned_ip]['active'] += 1
+
+                logger.info(
+                    f"[WS-SCHEDULE] {pair}/{timeframe} -> IP {assigned_ip} "
+                    f"(active on IP: {self._ip_stats.get(assigned_ip, {}).get('active', '?')})"
+                )
 
                 task = asyncio.create_task(
-                    self._continuously_async_watch_ohlcv(pair, timeframe, candle_type, ws_exchange)
+                    self._continuously_async_watch_ohlcv(pair, timeframe, candle_type, ws_exchange, assigned_ip)
                 )
                 self._background_tasks.add(task)
                 task.add_done_callback(
@@ -243,12 +281,14 @@ class ExchangeWS:
                         pair=pair,
                         timeframe=timeframe,
                         candle_type=candle_type,
+                        assigned_ip=assigned_ip,
                     )
                 )
 
     async def _unwatch_ohlcv(self, pair: str, timeframe: str, candle_type: CandleType) -> None:
         try:
-            ws_exchange = self._get_ws_exchange_for_pair(pair)
+            ws_exchange, assigned_ip = self._get_ws_exchange_for_pair(pair)
+            logger.debug(f"[WS-UNWATCH] {pair}/{timeframe} on IP {assigned_ip}")
             await ws_exchange.un_watch_ohlcv_for_symbols([[pair, timeframe]])
         except ccxt.NotSupported as e:
             logger.debug("un_watch_ohlcv_for_symbols not supported: %s", e)
@@ -256,9 +296,15 @@ class ExchangeWS:
             logger.exception("Exception in _unwatch_ohlcv")
 
     def _continuous_stopped(
-        self, task: asyncio.Task, pair: str, timeframe: str, candle_type: CandleType
+        self, task: asyncio.Task, pair: str, timeframe: str, candle_type: CandleType,
+        assigned_ip: str = 'unknown'
     ):
         self._background_tasks.discard(task)
+
+        # Decrement active count for this IP
+        if assigned_ip in self._ip_stats:
+            self._ip_stats[assigned_ip]['active'] = max(0, self._ip_stats[assigned_ip]['active'] - 1)
+
         result = "done"
         if task.cancelled():
             result = "cancelled"
@@ -266,7 +312,10 @@ class ExchangeWS:
             if (result1 := task.result()) is not None:
                 result = str(result1)
 
-        logger.info(f"{pair}, {timeframe}, {candle_type} - Task finished - {result}")
+        logger.info(
+            f"[WS-TASK-DONE] {pair}/{timeframe} on IP {assigned_ip} - result: {result} "
+            f"(remaining active on IP: {self._ip_stats.get(assigned_ip, {}).get('active', '?')})"
+        )
         asyncio.run_coroutine_threadsafe(
             self._unwatch_ohlcv(pair, timeframe, candle_type), loop=self._loop
         )
@@ -276,31 +325,66 @@ class ExchangeWS:
 
     async def _continuously_async_watch_ohlcv(
         self, pair: str, timeframe: str, candle_type: CandleType,
-        ws_exchange: ccxt.Exchange
+        ws_exchange: ccxt.Exchange, assigned_ip: str
     ) -> None:
+        first_message_received = False
         try:
+            logger.info(f"[WS-CONNECT] Starting watch for {pair}/{timeframe} on IP {assigned_ip}")
             while (pair, timeframe, candle_type) in self._klines_watching:
                 start = dt_ts()
                 data = await ws_exchange.watch_ohlcv(pair, timeframe)
                 self.klines_last_refresh[(pair, timeframe, candle_type)] = dt_ts()
+
+                if not first_message_received:
+                    first_message_received = True
+                    logger.info(
+                        f"[WS-CONNECTED] First data received for {pair}/{timeframe} on IP {assigned_ip} "
+                        f"(data points: {len(data)})"
+                    )
+
                 logger.debug(
-                    f"watch done {pair}, {timeframe}, data {len(data)} "
+                    f"watch done {pair}, {timeframe}, IP {assigned_ip}, data {len(data)} "
                     f"in {(dt_ts() - start) / 1000:.3f}s"
                 )
         except ccxt.ExchangeClosedByUser:
-            logger.debug("Exchange connection closed by user")
-        except ccxt.BaseError:
-            logger.exception(f"Exception in continuously_async_watch_ohlcv for {pair}, {timeframe}")
+            logger.info(f"[WS-CLOSED] Exchange closed by user for {pair}/{timeframe} on IP {assigned_ip}")
+        except ccxt.BaseError as e:
+            # Track failure statistics
+            if assigned_ip in self._ip_stats:
+                self._ip_stats[assigned_ip]['failures'] += 1
+                self._ip_stats[assigned_ip]['last_failure'] = str(e)[:100]
+
+            logger.error(
+                f"[WS-ERROR] {pair}/{timeframe} on IP {assigned_ip} failed: {type(e).__name__}: {e}"
+            )
+            # Log IP stats after failure
+            self._log_ip_stats()
         finally:
+            logger.info(
+                f"[WS-STOPPED] Watch ended for {pair}/{timeframe} on IP {assigned_ip} "
+                f"(received_data: {first_message_received})"
+            )
             self._klines_watching.discard((pair, timeframe, candle_type))
 
     def schedule_ohlcv(self, pair: str, timeframe: str, candle_type: CandleType) -> None:
         """
         Schedule a pair/timeframe combination to be watched
         """
-        self._klines_watching.add((pair, timeframe, candle_type))
-        self.klines_last_request[(pair, timeframe, candle_type)] = dt_ts()
-        # asyncio.run_coroutine_threadsafe(self.schedule_schedule(), loop=self._loop)
+        paircomb = (pair, timeframe, candle_type)
+        was_watching = paircomb in self._klines_watching
+        was_scheduled = paircomb in self._klines_scheduled
+
+        self._klines_watching.add(paircomb)
+        self.klines_last_request[paircomb] = dt_ts()
+
+        # Log if this is a reschedule attempt (was not watching but has IP assignment)
+        if not was_watching and not was_scheduled and pair in self._ip_assignments:
+            assigned_ip = self._ip_assignments[pair]
+            logger.info(
+                f"[WS-RESCHEDULE] {pair}/{timeframe} will be rescheduled on IP {assigned_ip} "
+                f"(IP failures: {self._ip_stats.get(assigned_ip, {}).get('failures', '?')})"
+            )
+
         asyncio.run_coroutine_threadsafe(self._schedule_while_true(), loop=self._loop)
         self.cleanup_expired()
 
