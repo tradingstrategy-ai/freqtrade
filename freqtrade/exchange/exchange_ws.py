@@ -29,6 +29,17 @@ class ExchangeWS:
         self._klines_scheduled: set[PairWithTimeframe] = set()
         self.klines_last_refresh: dict[PairWithTimeframe, float] = {}
         self.klines_last_request: dict[PairWithTimeframe, float] = {}
+
+        # IP rotation configuration for distributing WebSocket connections across multiple IPs
+        exchange_config = config.get('exchange', {})
+        self._ip_pool: list[str] = exchange_config.get('websocket_ip_pool', [])
+        self._current_ip_index = 0
+        self._ip_assignments: dict[str, str] = {}  # Track which pair uses which IP
+
+        if self._ip_pool:
+            logger.info(f"WebSocket IP pool initialized with {len(self._ip_pool)} IPs")
+            logger.debug(f"IP pool: {self._ip_pool}")
+
         self._thread = Thread(name="ccxt_ws", target=self._start_forever)
         self._thread.start()
         self.__cleanup_called = False
@@ -40,6 +51,30 @@ class ExchangeWS:
         finally:
             if self._loop.is_running():
                 self._loop.stop()
+
+    def _get_ip_for_pair(self, pair: str) -> tuple[str, int] | None:
+        """
+        Get IP address for a specific pair using round-robin assignment.
+        Returns tuple of (ip_address, port) or None if no IP pool configured.
+        """
+        if not self._ip_pool:
+            return None
+
+        # Check if pair already has an IP assigned
+        if pair not in self._ip_assignments:
+            # Assign next IP in round-robin fashion
+            assigned_ip = self._ip_pool[self._current_ip_index]
+            self._ip_assignments[pair] = assigned_ip
+            self._current_ip_index = (self._current_ip_index + 1) % len(self._ip_pool)
+
+            # Count connections on this IP
+            connections_on_ip = sum(1 for ip in self._ip_assignments.values() if ip == assigned_ip)
+            logger.info(
+                f"Assigned {pair} to IP {assigned_ip} "
+                f"({connections_on_ip}/75 connections on this IP)"
+            )
+
+        return (self._ip_assignments[pair], 0)  # Port 0 = any available port
 
     def cleanup(self) -> None:
         logger.debug("Cleanup called - stopping")
@@ -126,6 +161,13 @@ class ExchangeWS:
             if p not in self._klines_scheduled:
                 self._klines_scheduled.add(p)
                 pair, timeframe, candle_type = p
+
+                # Set IP for this connection before watching (for IP pool rotation)
+                local_addr = self._get_ip_for_pair(pair)
+                if local_addr:
+                    self._ccxt_object.options['local_addr'] = local_addr
+                    logger.debug(f"Set local_addr to {local_addr[0]} for {pair}")
+
                 task = asyncio.create_task(
                     self._continuously_async_watch_ohlcv(pair, timeframe, candle_type)
                 )
