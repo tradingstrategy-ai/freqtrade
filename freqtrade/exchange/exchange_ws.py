@@ -36,13 +36,50 @@ class ExchangeWS:
         self._current_ip_index = 0
         self._ip_assignments: dict[str, str] = {}  # Track which pair uses which IP
 
+        # Create dedicated CCXT exchange instances for each IP in the pool
+        # Each instance has its own session/connector with a fixed local_addr
+        self._ws_exchanges: dict[str, ccxt.Exchange] = {}
+
         if self._ip_pool:
-            logger.info(f"WebSocket IP pool initialized with {len(self._ip_pool)} IPs")
-            logger.debug(f"IP pool: {self._ip_pool}")
+            self._ws_exchanges = self._create_ws_exchange_pool(ccxt_object)
+            logger.info(f"WebSocket IP pool initialized with {len(self._ws_exchanges)} exchanges")
+        else:
+            # No IP pool - use single exchange for everything
+            self._ws_exchanges = {'default': ccxt_object}
 
         self._thread = Thread(name="ccxt_ws", target=self._start_forever)
         self._thread.start()
         self.__cleanup_called = False
+
+    def _create_ws_exchange_pool(self, template: ccxt.Exchange) -> dict[str, ccxt.Exchange]:
+        """Create dedicated CCXT exchange instances for each IP in the pool."""
+        exchanges = {}
+        exchange_class = type(template)  # e.g., ccxt.pro.hyperliquid
+
+        for ip in self._ip_pool:
+            # Build config dict with credentials from template
+            exchange_config = {
+                'apiKey': template.apiKey,
+                'secret': template.secret,
+                'enableRateLimit': template.enableRateLimit,
+                'rateLimit': template.rateLimit,
+                'options': {
+                    **template.options,
+                    'local_addr': (ip, 0)  # Set BEFORE first connection
+                }
+            }
+
+            # Add optional credentials if present (for exchanges like Hyperliquid)
+            if hasattr(template, 'walletAddress') and template.walletAddress:
+                exchange_config['walletAddress'] = template.walletAddress
+            if hasattr(template, 'privateKey') and template.privateKey:
+                exchange_config['privateKey'] = template.privateKey
+
+            new_exchange = exchange_class(exchange_config)
+            exchanges[ip] = new_exchange
+            logger.debug(f"Created WebSocket exchange for IP {ip}")
+
+        return exchanges
 
     def _start_forever(self) -> None:
         self._loop = asyncio.new_event_loop()
@@ -52,13 +89,13 @@ class ExchangeWS:
             if self._loop.is_running():
                 self._loop.stop()
 
-    def _get_ip_for_pair(self, pair: str) -> tuple[str, int] | None:
+    def _get_ws_exchange_for_pair(self, pair: str) -> ccxt.Exchange:
         """
-        Get IP address for a specific pair using round-robin assignment.
-        Returns tuple of (ip_address, port) or None if no IP pool configured.
+        Get the WebSocket exchange instance for a pair (round-robin assignment).
+        Returns the dedicated CCXT exchange instance for this pair's assigned IP.
         """
         if not self._ip_pool:
-            return None
+            return self._ws_exchanges.get('default', self._ccxt_object)
 
         # Check if pair already has an IP assigned
         if pair not in self._ip_assignments:
@@ -74,7 +111,7 @@ class ExchangeWS:
                 f"({connections_on_ip}/75 connections on this IP)"
             )
 
-        return (self._ip_assignments[pair], 0)  # Port 0 = any available port
+        return self._ws_exchanges[self._ip_assignments[pair]]
 
     def cleanup(self) -> None:
         logger.debug("Cleanup called - stopping")
@@ -105,10 +142,21 @@ class ExchangeWS:
 
     async def _cleanup_async(self) -> None:
         try:
-            await self._ccxt_object.close()
-            # Clear the cache.
-            # Not doing this will cause problems on startup with dynamic pairlists
-            self._ccxt_object.ohlcvs.clear()
+            # Close all WebSocket exchanges
+            for ip, ws_exchange in self._ws_exchanges.items():
+                try:
+                    await ws_exchange.close()
+                    # Clear the cache.
+                    # Not doing this will cause problems on startup with dynamic pairlists
+                    ws_exchange.ohlcvs.clear()
+                    logger.debug(f"Closed WebSocket exchange for IP {ip}")
+                except Exception:
+                    logger.exception(f"Exception closing exchange for IP {ip}")
+
+            # Also close main exchange if not in ws_exchanges
+            if self._ccxt_object not in self._ws_exchanges.values():
+                await self._ccxt_object.close()
+                self._ccxt_object.ohlcvs.clear()
         except Exception:
             logger.exception("Exception in _cleanup_async")
         finally:
@@ -118,7 +166,19 @@ class ExchangeWS:
         """
         Remove history for a pair/timeframe combination from ccxt cache
         """
-        self._ccxt_object.ohlcvs.get(paircomb[0], {}).pop(paircomb[1], None)
+        pair = paircomb[0]
+        timeframe = paircomb[1]
+
+        # Clear from assigned exchange
+        if pair in self._ip_assignments:
+            ip = self._ip_assignments[pair]
+            ws_exchange = self._ws_exchanges.get(ip)
+            if ws_exchange:
+                ws_exchange.ohlcvs.get(pair, {}).pop(timeframe, None)
+
+        # Also try default/main exchange as fallback
+        default_exchange = self._ws_exchanges.get('default', self._ccxt_object)
+        default_exchange.ohlcvs.get(pair, {}).pop(timeframe, None)
         self.klines_last_refresh.pop(paircomb, None)
 
     @retrier(retries=3)
@@ -129,7 +189,15 @@ class ExchangeWS:
             so the data will build up over time.
         """
         try:
-            return deepcopy(self._ccxt_object.ohlcvs.get(pair, {}).get(timeframe, []))
+            # Find the exchange that has this pair's data
+            if pair in self._ip_assignments:
+                ip = self._ip_assignments[pair]
+                ws_exchange = self._ws_exchanges.get(ip)
+                if ws_exchange:
+                    return deepcopy(ws_exchange.ohlcvs.get(pair, {}).get(timeframe, []))
+            # Fallback to default/main exchange
+            default_exchange = self._ws_exchanges.get('default', self._ccxt_object)
+            return deepcopy(default_exchange.ohlcvs.get(pair, {}).get(timeframe, []))
         except RuntimeError as e:
             # Capture runtime errors and retry
             # TemporaryError does not cause backoff - so we're essentially retrying immediately
@@ -162,14 +230,11 @@ class ExchangeWS:
                 self._klines_scheduled.add(p)
                 pair, timeframe, candle_type = p
 
-                # Set IP for this connection before watching (for IP pool rotation)
-                local_addr = self._get_ip_for_pair(pair)
-                if local_addr:
-                    self._ccxt_object.options['local_addr'] = local_addr
-                    logger.debug(f"Set local_addr to {local_addr[0]} for {pair}")
+                # Get the dedicated exchange instance for this pair
+                ws_exchange = self._get_ws_exchange_for_pair(pair)
 
                 task = asyncio.create_task(
-                    self._continuously_async_watch_ohlcv(pair, timeframe, candle_type)
+                    self._continuously_async_watch_ohlcv(pair, timeframe, candle_type, ws_exchange)
                 )
                 self._background_tasks.add(task)
                 task.add_done_callback(
@@ -183,10 +248,10 @@ class ExchangeWS:
 
     async def _unwatch_ohlcv(self, pair: str, timeframe: str, candle_type: CandleType) -> None:
         try:
-            await self._ccxt_object.un_watch_ohlcv_for_symbols([[pair, timeframe]])
+            ws_exchange = self._get_ws_exchange_for_pair(pair)
+            await ws_exchange.un_watch_ohlcv_for_symbols([[pair, timeframe]])
         except ccxt.NotSupported as e:
             logger.debug("un_watch_ohlcv_for_symbols not supported: %s", e)
-            pass
         except Exception:
             logger.exception("Exception in _unwatch_ohlcv")
 
@@ -210,12 +275,13 @@ class ExchangeWS:
         self._pop_history((pair, timeframe, candle_type))
 
     async def _continuously_async_watch_ohlcv(
-        self, pair: str, timeframe: str, candle_type: CandleType
+        self, pair: str, timeframe: str, candle_type: CandleType,
+        ws_exchange: ccxt.Exchange
     ) -> None:
         try:
             while (pair, timeframe, candle_type) in self._klines_watching:
                 start = dt_ts()
-                data = await self._ccxt_object.watch_ohlcv(pair, timeframe)
+                data = await ws_exchange.watch_ohlcv(pair, timeframe)
                 self.klines_last_refresh[(pair, timeframe, candle_type)] = dt_ts()
                 logger.debug(
                     f"watch done {pair}, {timeframe}, data {len(data)} "
