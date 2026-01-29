@@ -43,6 +43,11 @@ class ExchangeWS:
         # IP pool statistics for debugging
         self._ip_stats: dict[str, dict] = {}  # {ip: {active: int, failures: int, last_failure: str}}
 
+        # Periodic refresh configuration
+        self._ip_connection_times: dict[str, float] = {}  # {ip: timestamp when connections established}
+        self._refresh_interval_seconds: int = exchange_config.get('websocket_refresh_interval', 1200)  # 20 min default
+        self._refresh_stagger_seconds: int = exchange_config.get('websocket_refresh_stagger', 600)  # 10 min default
+
         if self._ip_pool:
             self._ws_exchanges = self._create_ws_exchange_pool(ccxt_object)
             # Initialize stats for each IP
@@ -75,38 +80,49 @@ class ExchangeWS:
         )
         logger.info(f"[IP-STATS] {stats_str}")
 
+    def _create_single_ws_exchange(self, ip: str) -> ccxt.Exchange:
+        """Create a single CCXT exchange instance bound to a specific IP."""
+        template = self._ccxt_object
+        exchange_class = type(template)  # e.g., ccxt.pro.hyperliquid
+
+        exchange_config = {
+            'apiKey': template.apiKey,
+            'secret': template.secret,
+            'enableRateLimit': template.enableRateLimit,
+            'rateLimit': template.rateLimit,
+            'options': {
+                **template.options,
+                'local_addr': (ip, 0)  # Set BEFORE first connection
+            }
+        }
+
+        # Add optional credentials if present (for exchanges like Hyperliquid)
+        if hasattr(template, 'walletAddress') and template.walletAddress:
+            exchange_config['walletAddress'] = template.walletAddress
+        if hasattr(template, 'privateKey') and template.privateKey:
+            exchange_config['privateKey'] = template.privateKey
+
+        return exchange_class(exchange_config)
+
     def _create_ws_exchange_pool(self, template: ccxt.Exchange) -> dict[str, ccxt.Exchange]:
         """Create dedicated CCXT exchange instances for each IP in the pool."""
         exchanges = {}
-        exchange_class = type(template)  # e.g., ccxt.pro.hyperliquid
-
         for ip in self._ip_pool:
-            # Build config dict with credentials from template
-            exchange_config = {
-                'apiKey': template.apiKey,
-                'secret': template.secret,
-                'enableRateLimit': template.enableRateLimit,
-                'rateLimit': template.rateLimit,
-                'options': {
-                    **template.options,
-                    'local_addr': (ip, 0)  # Set BEFORE first connection
-                }
-            }
-
-            # Add optional credentials if present (for exchanges like Hyperliquid)
-            if hasattr(template, 'walletAddress') and template.walletAddress:
-                exchange_config['walletAddress'] = template.walletAddress
-            if hasattr(template, 'privateKey') and template.privateKey:
-                exchange_config['privateKey'] = template.privateKey
-
-            new_exchange = exchange_class(exchange_config)
-            exchanges[ip] = new_exchange
+            exchanges[ip] = self._create_single_ws_exchange(ip)
             logger.debug(f"Created WebSocket exchange for IP {ip}")
-
         return exchanges
 
     def _start_forever(self) -> None:
         self._loop = asyncio.new_event_loop()
+
+        # Start refresh scheduler if IP pool is configured
+        if self._ip_pool:
+            self._loop.create_task(self._refresh_scheduler())
+            logger.info(
+                f"[REFRESH-SCHEDULER] Started periodic refresh scheduler "
+                f"(interval={self._refresh_interval_seconds}s, stagger={self._refresh_stagger_seconds}s)"
+            )
+
         try:
             self._loop.run_forever()
         finally:
@@ -186,6 +202,85 @@ class ExchangeWS:
             logger.exception("Exception in _cleanup_async")
         finally:
             self.__cleanup_called = True
+
+    async def _refresh_ip_connections(self, ip: str) -> None:
+        """
+        Refresh all WebSocket connections for a specific IP.
+        Closes existing connections and allows them to be rescheduled.
+        """
+        logger.info(f"[REFRESH-START] Refreshing connections for IP {ip}")
+
+        # Find all pairs assigned to this IP
+        pairs_on_ip = [pair for pair, assigned_ip in self._ip_assignments.items() if assigned_ip == ip]
+
+        # Find all active paircomb entries for these pairs
+        paircombs_to_refresh = [
+            p for p in self._klines_watching
+            if p[0] in pairs_on_ip
+        ]
+
+        logger.info(f"[REFRESH] IP {ip}: refreshing {len(paircombs_to_refresh)} streams for {len(pairs_on_ip)} pairs")
+
+        # Close the WebSocket exchange for this IP
+        ws_exchange = self._ws_exchanges.get(ip)
+        if ws_exchange:
+            try:
+                await ws_exchange.close()
+                ws_exchange.ohlcvs.clear()
+            except Exception as e:
+                logger.warning(f"[REFRESH] Error closing exchange for IP {ip}: {e}")
+
+        # Recreate the exchange instance
+        self._ws_exchanges[ip] = self._create_single_ws_exchange(ip)
+
+        # Clear connection time to allow re-tracking
+        self._ip_connection_times.pop(ip, None)
+
+        # Remove from scheduled so they get rescheduled
+        for p in paircombs_to_refresh:
+            self._klines_scheduled.discard(p)
+            # Keep in _klines_watching so they get picked up by _schedule_while_true
+
+        # Reset stats for this IP
+        if ip in self._ip_stats:
+            self._ip_stats[ip] = {'active': 0, 'failures': 0, 'last_failure': None}
+
+        logger.info(f"[REFRESH-DONE] IP {ip} refresh complete, streams will reconnect")
+
+    async def _refresh_scheduler(self) -> None:
+        """
+        Background task that monitors connection ages and triggers refresh.
+        Runs every 60 seconds to check if any IP needs refresh.
+        """
+        while True:
+            await asyncio.sleep(60)  # Check every minute
+
+            if not self._ip_pool:
+                continue
+
+            current_time = time.time()
+            current_minute = int(current_time // 60) % 60
+
+            # Avoid candle boundaries (:58-:02 of each hour)
+            if current_minute >= 58 or current_minute <= 2:
+                logger.debug("[REFRESH-SCHEDULER] Skipping - too close to candle boundary")
+                continue
+
+            for i, ip in enumerate(self._ip_pool):
+                connection_time = self._ip_connection_times.get(ip)
+                if connection_time is None:
+                    continue
+
+                age_seconds = current_time - connection_time
+
+                # Calculate this IP's refresh window based on stagger
+                stagger_offset = i * self._refresh_stagger_seconds
+                time_since_last_refresh_window = (current_time - stagger_offset) % self._refresh_interval_seconds
+
+                # Refresh if connection is old enough and we're in this IP's refresh window
+                if age_seconds >= self._refresh_interval_seconds and time_since_last_refresh_window < 120:
+                    logger.info(f"[REFRESH-TRIGGER] IP {ip} age={age_seconds:.0f}s, triggering refresh")
+                    await self._refresh_ip_connections(ip)
 
     def _pop_history(self, paircomb: PairWithTimeframe) -> None:
         """
@@ -337,6 +432,12 @@ class ExchangeWS:
 
                 if not first_message_received:
                     first_message_received = True
+                    # Track connection time for this IP (only set once per IP refresh cycle)
+                    if assigned_ip not in self._ip_connection_times:
+                        self._ip_connection_times[assigned_ip] = time.time()
+                        logger.info(
+                            f"[WS-CONNECTED] First connection on IP {assigned_ip} - tracking refresh timer"
+                        )
                     logger.info(
                         f"[WS-CONNECTED] First data received for {pair}/{timeframe} on IP {assigned_ip} "
                         f"(data points: {len(data)})"
