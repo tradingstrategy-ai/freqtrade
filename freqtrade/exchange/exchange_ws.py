@@ -26,6 +26,7 @@ class IPState(Enum):
     SPINNING_UP = "spinning_up" # Connecting streams, preparing to become active
     STANDBY = "standby"         # Idle but fresh session
     TEARING_DOWN = "tearing_down"  # Disconnecting, moving to standby
+    HOT_BACKUP = "hot_backup"   # Has streams and cached data, ready for instant failover
 
 
 class ExchangeWS:
@@ -50,10 +51,18 @@ class ExchangeWS:
         self._active_ip: str | None = None
         self._rotation_lock: asyncio.Lock | None = None  # Created in event loop
 
-        # Configuration parameters
+        # Configuration parameters (legacy - kept for backwards compatibility)
         self._active_max_age_seconds: int = exchange_config.get('websocket_active_max_age', 1200)  # 20 min
         self._standby_refresh_seconds: int = exchange_config.get('websocket_standby_refresh', 900)  # 15 min
         self._spinup_lead_time_seconds: int = exchange_config.get('websocket_spinup_lead_time', 120)  # 2 min
+
+        # Danger zone configuration parameters
+        self._danger_zone_start_minute: int = exchange_config.get('ws_danger_zone_start', 45)
+        self._post_danger_zone_minute: int = exchange_config.get('ws_post_danger_zone', 2)
+        self._spinup_schedule: list[int] = exchange_config.get('ws_spinup_schedule', [15, 7])
+        self._data_freshness_threshold_ms: int = exchange_config.get('ws_freshness_threshold', 300) * 1000
+        self._in_danger_zone: bool = False
+        self._spinup_initiated: set[str] = set()  # Track which IPs have been spun up in current danger zone
 
         # Create dedicated CCXT exchange instances for each IP
         self._ws_exchanges: dict[str, ccxt.Exchange] = {}
@@ -144,7 +153,11 @@ class ExchangeWS:
         for ip in self._ip_pool:
             if ip in self._ip_connection_start:
                 ages[ip] = f"{time.time() - self._ip_connection_start[ip]:.0f}s"
-        logger.info(f"[ROTATION-STATE] Active: {self._active_ip} | States: {states} | Ages: {ages}")
+        danger_zone_str = "IN_DANGER_ZONE" if self._in_danger_zone else "normal"
+        logger.info(
+            f"[ROTATION-STATE] Active: {self._active_ip} | Zone: {danger_zone_str} | "
+            f"States: {states} | Ages: {ages}"
+        )
 
     def _start_forever(self) -> None:
         self._loop = asyncio.new_event_loop()
@@ -152,12 +165,13 @@ class ExchangeWS:
         # Create the rotation lock in the event loop
         self._rotation_lock = asyncio.Lock()
 
-        # Start rotation controller if IP pool is configured
+        # Start danger zone controller if IP pool is configured
         if self._ip_pool:
-            self._loop.create_task(self._rotation_controller())
+            self._loop.create_task(self._danger_zone_controller())
             logger.info(
-                f"[ROTATION-CONTROLLER] Started (max_age={self._active_max_age_seconds}s, "
-                f"standby_refresh={self._standby_refresh_seconds}s, lead_time={self._spinup_lead_time_seconds}s)"
+                f"[DANGER-ZONE-CONTROLLER] Started (danger_zone_start=:{self._danger_zone_start_minute:02d}, "
+                f"post_danger=:{self._post_danger_zone_minute:02d}, spinup_schedule={self._spinup_schedule}, "
+                f"freshness_threshold={self._data_freshness_threshold_ms/1000:.0f}s)"
             )
 
         try:
@@ -166,14 +180,20 @@ class ExchangeWS:
             if self._loop.is_running():
                 self._loop.stop()
 
-    async def _rotation_controller(self) -> None:
+    async def _danger_zone_controller(self) -> None:
         """
-        Main controller for IP rotation.
-        Monitors active IP age and triggers rotation.
-        Keeps standby IPs fresh.
+        Manage danger zone entry/exit and scheduled spinups.
+
+        Timeline for 1h candle close at :00:
+        - :00-:44  IP1 only (primary)
+        - :45      Enter danger zone, IP2 starts spinup
+        - :53      IP3 starts spinup
+        - :00      DANGER ZONE - Hyperliquid may kill connections
+                   ohlcvs() cascades: IP1 → IP2 → IP3 → REST
+        - :02      Exit danger zone, determine survivor, teardown others
         """
         while True:
-            await asyncio.sleep(30)  # Check every 30 seconds
+            await asyncio.sleep(10)  # Check every 10 seconds
 
             if not self._ip_pool:
                 continue
@@ -181,33 +201,158 @@ class ExchangeWS:
             current_time = time.time()
             current_minute = int(current_time // 60) % 60
 
-            # Avoid candle boundaries (:58-:02)
-            if current_minute >= 58 or current_minute <= 2:
-                logger.debug("[ROTATION] Skipping - candle boundary window")
+            async with self._rotation_lock:
+                # Enter danger zone at configured minute (default :45)
+                if not self._in_danger_zone and current_minute >= self._danger_zone_start_minute:
+                    await self._enter_danger_zone(current_minute)
+
+                # Check spinup schedule during danger zone
+                if self._in_danger_zone:
+                    await self._check_spinup_schedule(current_minute)
+
+                # Exit danger zone at configured minute (default :02)
+                # Only exit when minute is >= post_danger AND < 30 (to avoid re-entering)
+                if self._in_danger_zone and current_minute >= self._post_danger_zone_minute and current_minute < 30:
+                    await self._exit_danger_zone(current_minute)
+
+                # Keep standby IPs fresh (outside danger zone)
+                if not self._in_danger_zone:
+                    await self._refresh_standby_sessions(current_time)
+
+                # Log state periodically (every ~5 minutes)
+                if int(current_time) % 300 < 10:
+                    self._log_rotation_state()
+
+    async def _enter_danger_zone(self, current_minute: int) -> None:
+        """Enter danger zone - prepare for candle boundary."""
+        self._in_danger_zone = True
+        self._spinup_initiated.clear()  # Reset spinup tracking for new danger zone
+        logger.info(
+            f"[DANGER-ZONE-ENTER] Entering danger zone at :{current_minute:02d}. "
+            f"Active IP: {self._active_ip}. Schedule: spinup at {self._spinup_schedule} min before :00"
+        )
+
+    async def _check_spinup_schedule(self, current_minute: int) -> None:
+        """Spin up backup IPs according to schedule."""
+        standby_ips = [ip for ip in self._ip_pool if self._ip_states.get(ip) == IPState.STANDBY]
+
+        # Schedule: [15, 7] means IP2 at :45 (60-15), IP3 at :53 (60-7)
+        for i, minutes_before in enumerate(self._spinup_schedule):
+            target_minute = 60 - minutes_before
+            if current_minute >= target_minute and i < len(standby_ips):
+                ip = standby_ips[i]
+                if ip not in self._spinup_initiated:
+                    logger.info(
+                        f"[SPINUP-SCHEDULE] Minute :{current_minute:02d} >= :{target_minute:02d}, "
+                        f"spinning up backup #{i+1}: {ip}"
+                    )
+                    self._spinup_initiated.add(ip)
+                    await self._spinup_for_danger_zone(ip)
+
+    async def _spinup_for_danger_zone(self, ip: str) -> None:
+        """Spin up IP and mark as HOT_BACKUP (not ACTIVE - just backup with data)."""
+        logger.info(f"[SPINUP-START] Starting HOT_BACKUP spinup for IP {ip}")
+        self._ip_states[ip] = IPState.SPINNING_UP
+
+        # Get all pairs we should be watching
+        pairs_to_connect = set(p[0] for p in self._klines_watching)
+        timeframes = set((p[1], p[2]) for p in self._klines_watching)
+
+        ws_exchange = self._ws_exchanges[ip]
+        connected_count = 0
+        failed_count = 0
+
+        # Connect each pair/timeframe combination
+        for pair in pairs_to_connect:
+            for timeframe, candle_type in timeframes:
+                try:
+                    await ws_exchange.watch_ohlcv(pair, timeframe)
+                    connected_count += 1
+                except Exception as e:
+                    logger.error(f"[SPINUP] Failed to connect {pair}/{timeframe} on {ip}: {e}")
+                    failed_count += 1
+
+        # Record connection start time
+        self._ip_connection_start[ip] = time.time()
+
+        # Mark as HOT_BACKUP - NOT ACTIVE (just ready for failover)
+        self._ip_states[ip] = IPState.HOT_BACKUP
+
+        logger.info(
+            f"[SPINUP-DONE] IP {ip} now HOT_BACKUP with {connected_count} streams "
+            f"({failed_count} failed)"
+        )
+
+    async def _exit_danger_zone(self, current_minute: int) -> None:
+        """Exit danger zone - determine survivor and teardown others."""
+        logger.info(f"[DANGER-ZONE-EXIT] Exiting danger zone at :{current_minute:02d}")
+
+        # Determine which IP has fresh data
+        survivor = await self._determine_survivor()
+
+        if survivor and survivor != self._active_ip:
+            logger.info(
+                f"[DANGER-ZONE-EXIT] Survivor changed: {self._active_ip} -> {survivor}"
+            )
+            await self._promote_to_active(survivor)
+        else:
+            logger.info(f"[DANGER-ZONE-EXIT] Active IP {self._active_ip} survived")
+
+        # Teardown non-survivor HOT_BACKUP IPs
+        for ip in self._ip_pool:
+            if ip != self._active_ip and self._ip_states.get(ip) == IPState.HOT_BACKUP:
+                logger.info(f"[TEARDOWN] Tearing down non-survivor HOT_BACKUP IP {ip}")
+                await self._teardown_ip(ip)
+
+        self._in_danger_zone = False
+        self._spinup_initiated.clear()
+        self._log_rotation_state()
+
+    async def _determine_survivor(self) -> str | None:
+        """Find IP with fresh data after danger zone."""
+        # Check IPs in priority order: ACTIVE first, then HOT_BACKUPs
+        ips_to_check = []
+        if self._active_ip:
+            ips_to_check.append(self._active_ip)
+        for ip in self._ip_pool:
+            if ip not in ips_to_check and self._ip_states.get(ip) == IPState.HOT_BACKUP:
+                ips_to_check.append(ip)
+
+        for ip in ips_to_check:
+            ws_exchange = self._ws_exchanges.get(ip)
+            if not ws_exchange:
                 continue
 
-            async with self._rotation_lock:
-                # 1. Keep standby IPs fresh
-                await self._refresh_standby_sessions(current_time)
+            # Sample a few pairs to check freshness
+            sample_pairs = list(self._klines_watching)[:3]
+            fresh_count = 0
+            for p, tf, _ in sample_pairs:
+                data = ws_exchange.ohlcvs.get(p, {}).get(tf, [])
+                if self._is_data_fresh(data):
+                    fresh_count += 1
 
-                # 2. Check if rotation needed
-                if self._active_ip and self._ip_states.get(self._active_ip) == IPState.ACTIVE:
-                    active_start = self._ip_connection_start.get(self._active_ip)
-                    if active_start:
-                        active_age = current_time - active_start
-                        time_until_rotation = self._active_max_age_seconds - active_age
+            if fresh_count > 0:
+                logger.debug(f"[SURVIVOR] IP {ip} has {fresh_count} fresh pairs")
+                return ip
+            else:
+                logger.warning(f"[SURVIVOR] IP {ip} has no fresh data")
 
-                        # Log state periodically
-                        if int(current_time) % 300 < 30:  # Every ~5 minutes
-                            self._log_rotation_state()
+        logger.warning("[SURVIVOR] No IP with fresh data found, returning current active")
+        return self._active_ip  # Fallback to current active
 
-                        # Start spinup when we're within lead time of rotation
-                        if time_until_rotation <= self._spinup_lead_time_seconds:
-                            logger.info(
-                                f"[ROTATION] Active IP {self._active_ip} age={active_age:.0f}s, "
-                                f"time_until_rotation={time_until_rotation:.0f}s - initiating rotation"
-                            )
-                            await self._initiate_rotation()
+    async def _promote_to_active(self, ip: str) -> None:
+        """Promote IP to active status."""
+        old_active = self._active_ip
+
+        self._ip_states[ip] = IPState.ACTIVE
+        self._active_ip = ip
+        self._klines_scheduled.clear()
+
+        logger.info(f"[PROMOTE] IP {ip} promoted to ACTIVE (was: {old_active})")
+
+        if old_active and old_active != ip:
+            # Demote old active to HOT_BACKUP temporarily (will be torn down in _exit_danger_zone)
+            self._ip_states[old_active] = IPState.HOT_BACKUP
 
     async def _refresh_standby_sessions(self, current_time: float) -> None:
         """Refresh standby IP sessions to keep them fresh."""
@@ -339,7 +484,14 @@ class ExchangeWS:
         logger.warning(f"[FAILOVER] Active IP {failed_ip} failed unexpectedly, initiating failover")
 
         async with self._rotation_lock:
-            # Find any standby IP
+            # First, check for HOT_BACKUP IPs (already have data, instant failover)
+            for ip in self._ip_pool:
+                if self._ip_states.get(ip) == IPState.HOT_BACKUP:
+                    logger.info(f"[FAILOVER] Instant failover to HOT_BACKUP IP {ip}")
+                    await self._promote_to_active(ip)
+                    return
+
+            # Fallback: spin up a standby IP
             for ip in self._ip_pool:
                 if self._ip_states.get(ip) == IPState.STANDBY:
                     logger.info(f"[FAILOVER] Failing over to standby IP {ip}")
@@ -411,23 +563,51 @@ class ExchangeWS:
         self._ccxt_object.ohlcvs.get(pair, {}).pop(timeframe, None)
         self.klines_last_refresh.pop(paircomb, None)
 
+    def _get_ips_by_priority(self) -> list[str]:
+        """Return IPs ordered: ACTIVE first, then HOT_BACKUPs, then SPINNING_UP."""
+        result = []
+        if self._active_ip:
+            result.append(self._active_ip)
+        for ip in self._ip_pool:
+            if ip not in result and self._ip_states.get(ip) == IPState.HOT_BACKUP:
+                result.append(ip)
+        for ip in self._ip_pool:
+            if ip not in result and self._ip_states.get(ip) == IPState.SPINNING_UP:
+                result.append(ip)
+        return result
+
+    def _is_data_fresh(self, data: list) -> bool:
+        """Check if data is fresh enough to use."""
+        if not data:
+            return False
+        last_ts = data[-1][0]  # Timestamp in ms
+        current_ts = time.time() * 1000
+        return (current_ts - last_ts) < self._data_freshness_threshold_ms
+
     @retrier(retries=3)
     def ohlcvs(self, pair: str, timeframe: str) -> list[list]:
         """
-        Returns a copy of the klines for a pair/timeframe combination
-        Note: this will only contain the data received from the websocket
-            so the data will build up over time.
+        Returns a copy of the klines for a pair/timeframe combination.
+        Cascades through all IPs with data before returning empty.
+
+        Priority order: ACTIVE → HOT_BACKUP → SPINNING_UP → REST fallback
         """
         try:
-            # Get data from active IP's exchange
-            if self._active_ip:
-                ws_exchange = self._ws_exchanges.get(self._active_ip)
-                if ws_exchange:
-                    data = deepcopy(ws_exchange.ohlcvs.get(pair, {}).get(timeframe, []))
-                    if data:
-                        return data
+            # Cascade through IPs in priority order
+            for ip in self._get_ips_by_priority():
+                ws_exchange = self._ws_exchanges.get(ip)
+                if not ws_exchange:
+                    continue
 
-            # Fallback to default/main exchange
+                data = ws_exchange.ohlcvs.get(pair, {}).get(timeframe, [])
+                if data and self._is_data_fresh(data):
+                    if ip != self._active_ip:
+                        logger.debug(
+                            f"[CASCADE] Using data from {ip} (not active) for {pair}/{timeframe}"
+                        )
+                    return deepcopy(data)
+
+            # Fallback to default/main exchange (no IP pool case)
             default_exchange = self._ws_exchanges.get('default', self._ccxt_object)
             return deepcopy(default_exchange.ohlcvs.get(pair, {}).get(timeframe, []))
         except RuntimeError as e:
