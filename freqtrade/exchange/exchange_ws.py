@@ -63,6 +63,7 @@ class ExchangeWS:
         self._data_freshness_threshold_ms: int = exchange_config.get('ws_freshness_threshold', 300) * 1000
         self._in_danger_zone: bool = False
         self._spinup_initiated: set[str] = set()  # Track which IPs have been spun up in current danger zone
+        self._backup_tasks: dict[str, set[asyncio.Task]] = {}  # Track background tasks per backup IP
 
         # Create dedicated CCXT exchange instances for each IP
         self._ws_exchanges: dict[str, ccxt.Exchange] = {}
@@ -250,27 +251,27 @@ class ExchangeWS:
                     await self._spinup_for_danger_zone(ip)
 
     async def _spinup_for_danger_zone(self, ip: str) -> None:
-        """Spin up IP and mark as HOT_BACKUP (not ACTIVE - just backup with data)."""
+        """Spin up IP with continuous watch loops to populate ohlcvs cache."""
         logger.info(f"[SPINUP-START] Starting HOT_BACKUP spinup for IP {ip}")
         self._ip_states[ip] = IPState.SPINNING_UP
 
         # Get all pairs we should be watching
-        pairs_to_connect = set(p[0] for p in self._klines_watching)
-        timeframes = set((p[1], p[2]) for p in self._klines_watching)
+        pairs_to_watch = list(self._klines_watching)
+
+        if not pairs_to_watch:
+            logger.warning(f"[SPINUP] No pairs in _klines_watching, cannot spin up backup {ip}")
+            self._ip_states[ip] = IPState.STANDBY
+            return
 
         ws_exchange = self._ws_exchanges[ip]
-        connected_count = 0
-        failed_count = 0
+        self._backup_tasks[ip] = set()
 
-        # Connect each pair/timeframe combination
-        for pair in pairs_to_connect:
-            for timeframe, candle_type in timeframes:
-                try:
-                    await ws_exchange.watch_ohlcv(pair, timeframe)
-                    connected_count += 1
-                except Exception as e:
-                    logger.error(f"[SPINUP] Failed to connect {pair}/{timeframe} on {ip}: {e}")
-                    failed_count += 1
+        # Start continuous watch tasks for each pair (like active IP does)
+        for pair, timeframe, candle_type in pairs_to_watch:
+            task = asyncio.create_task(
+                self._continuously_watch_backup(pair, timeframe, candle_type, ws_exchange, ip)
+            )
+            self._backup_tasks[ip].add(task)
 
         # Record connection start time
         self._ip_connection_start[ip] = time.time()
@@ -279,9 +280,29 @@ class ExchangeWS:
         self._ip_states[ip] = IPState.HOT_BACKUP
 
         logger.info(
-            f"[SPINUP-DONE] IP {ip} now HOT_BACKUP with {connected_count} streams "
-            f"({failed_count} failed)"
+            f"[SPINUP-DONE] IP {ip} now HOT_BACKUP with {len(pairs_to_watch)} watch tasks started"
         )
+
+    async def _continuously_watch_backup(
+        self, pair: str, timeframe: str, candle_type: CandleType,
+        ws_exchange: ccxt.Exchange, ip: str
+    ) -> None:
+        """Continuous watch loop for backup IP to populate ohlcvs cache."""
+        first_message_received = False
+        try:
+            while self._ip_states.get(ip) in (IPState.SPINNING_UP, IPState.HOT_BACKUP):
+                data = await ws_exchange.watch_ohlcv(pair, timeframe)
+
+                if not first_message_received:
+                    first_message_received = True
+                    logger.debug(
+                        f"[BACKUP-CONNECTED] First data for {pair}/{timeframe} on backup IP {ip} "
+                        f"(data points: {len(data)})"
+                    )
+        except ccxt.ExchangeClosedByUser:
+            pass  # Expected during teardown
+        except ccxt.BaseError as e:
+            logger.warning(f"[BACKUP-ERROR] {pair}/{timeframe} on backup {ip}: {type(e).__name__}: {e}")
 
     async def _exit_danger_zone(self, current_minute: int) -> None:
         """Exit danger zone - determine survivor and teardown others."""
@@ -453,6 +474,13 @@ class ExchangeWS:
     async def _teardown_ip(self, ip: str) -> None:
         """Tear down connections on an IP and return it to standby."""
         logger.info(f"[TEARDOWN-START] Disconnecting IP {ip}")
+
+        # Cancel any backup watch tasks for this IP
+        if ip in self._backup_tasks:
+            for task in self._backup_tasks[ip]:
+                task.cancel()
+            self._backup_tasks.pop(ip, None)
+            logger.debug(f"[TEARDOWN] Cancelled backup tasks for IP {ip}")
 
         ws_exchange = self._ws_exchanges.get(ip)
         if ws_exchange:
