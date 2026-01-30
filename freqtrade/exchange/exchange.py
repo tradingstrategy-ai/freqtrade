@@ -2524,14 +2524,33 @@ class Exchange:
                 self._exchange_ws.klines_last_refresh.get((pair, timeframe, candle_type), 0)
             )
 
+            # Evaluate conditions separately for diagnostic logging
+            condition1 = len(candles) > 1 and candles[-1][0] >= prev_candle_ts
+            condition2 = len(candles) == 1 and candles[-1][0] < candle_ts
+            refresh_ok = last_refresh_time >= half_candle
+
+            # DIAGNOSTIC: Log exactly why WS fails near candle boundaries
+            import time
+            current_minute = int(time.time() // 60) % 60
+            if current_minute >= 58 or current_minute <= 2:
+                last_candle_ts = candles[-1][0] if candles else 0
+                logger.info(
+                    f"[WS-EVAL] :{current_minute:02d} {pair}/{timeframe} "
+                    f"candles={len(candles)} "
+                    f"last_ts={last_candle_ts} "
+                    f"expected_ts={candle_ts} "
+                    f"prev_candle_ts={prev_candle_ts} "
+                    f"half_candle={half_candle} "
+                    f"last_refresh={last_refresh_time} "
+                    f"condition1={condition1} "
+                    f"condition2={condition2} "
+                    f"refresh_ok={refresh_ok}"
+                )
+
             if (
                 candles
-                and (
-                    (len(candles) > 1 and candles[-1][0] >= prev_candle_ts)
-                    # Edgecase on reconnect, where 1 candle is available but it's the current one
-                    or (len(candles) == 1 and candles[-1][0] < candle_ts)
-                )
-                and last_refresh_time >= half_candle
+                and (condition1 or condition2)
+                and refresh_ok
             ):
                 # Usable result, candle contains the previous candle.
                 # Also, we check if the last refresh time is no more than half the candle ago.
@@ -2539,9 +2558,9 @@ class Exchange:
 
                 return self._exchange_ws.get_ohlcv(pair, timeframe, candle_type, candle_ts)
             logger.info(
-                f"Couldn't reuse watch for {pair}, {timeframe}, falling back to REST api. "
-                f"{candle_ts < last_refresh_time}, {candle_ts}, {last_refresh_time}, "
-                f"{format_ms_time(candle_ts)}, {format_ms_time(last_refresh_time)} "
+                f"[WS-FALLBACK] Couldn't reuse watch for {pair}, {timeframe}, falling back to REST api. "
+                f"candles={len(candles)} condition1={condition1} condition2={condition2} refresh_ok={refresh_ok} "
+                f"candle_ts={format_ms_time(candle_ts)} last_refresh={format_ms_time(last_refresh_time)}"
             )
         return None
 

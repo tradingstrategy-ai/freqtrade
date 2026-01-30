@@ -2,6 +2,7 @@ import asyncio
 import logging
 import time
 from copy import deepcopy
+from datetime import datetime
 from enum import Enum
 from functools import partial
 from threading import Thread
@@ -69,6 +70,9 @@ class ExchangeWS:
         self._ws_exchanges: dict[str, ccxt.Exchange] = {}
         self._ip_stats: dict[str, dict] = {}
 
+        # Diagnostic metrics per IP for candle boundary analysis
+        self._ip_metrics: dict[str, dict] = {}
+
         if self._ip_pool:
             self._ws_exchanges = self._create_ws_exchange_pool(ccxt_object)
             # Initialize states: first IP is active, others are standby
@@ -80,6 +84,16 @@ class ExchangeWS:
                     self._ip_states[ip] = IPState.STANDBY
                 self._ip_session_times[ip] = time.time()
                 self._ip_stats[ip] = {'active': 0, 'failures': 0, 'last_failure': None}
+                # Initialize diagnostic metrics for candle boundary analysis
+                self._ip_metrics[ip] = {
+                    'subscriptions': 0,
+                    'messages_received': 0,
+                    'messages_sent': 0,
+                    'last_minute_reset': time.time(),
+                    'candles_received': 0,
+                    'last_candle_ts': 0,
+                    'errors': [],
+                }
             logger.info(
                 f"[IP-POOL] Initialized Rolling Active + Hot Standby with {len(self._ip_pool)} IPs. "
                 f"Active: {self._active_ip}, Standby: {[ip for ip in self._ip_pool if ip != self._active_ip]}"
@@ -160,6 +174,55 @@ class ExchangeWS:
             f"States: {states} | Ages: {ages}"
         )
 
+    def _log_metrics_summary(self) -> None:
+        """Log comprehensive metrics for all IPs - for candle boundary analysis."""
+        if not self._ip_pool:
+            return
+        for ip in self._ip_pool:
+            m = self._ip_metrics.get(ip, {})
+            ws_ex = self._ws_exchanges.get(ip)
+
+            # Count actual subscriptions in ccxt
+            sub_count = 0
+            if ws_ex and hasattr(ws_ex, 'ohlcvs'):
+                for pair_data in ws_ex.ohlcvs.values():
+                    sub_count += len(pair_data)
+
+            last_candle_str = 'never'
+            if m.get('last_candle_ts'):
+                last_candle_str = datetime.fromtimestamp(
+                    m.get('last_candle_ts', 0) / 1000
+                ).strftime('%H:%M:%S')
+
+            logger.info(
+                f"[METRICS] IP={ip} state={self._ip_states.get(ip, 'unknown').value if self._ip_states.get(ip) else 'unknown'} "
+                f"subscriptions={sub_count} "
+                f"candles_received={m.get('candles_received', 0)} "
+                f"last_candle={last_candle_str} "
+                f"recent_errors={len(m.get('errors', []))}"
+            )
+
+    def _log_candle_close_state(self, current_minute: int, current_second: int) -> None:
+        """Log state at exact candle close moment (:00:00 - :00:10)."""
+        if not self._ip_pool:
+            return
+        logger.info(f"[CANDLE-CLOSE] At :{current_minute:02d}:{current_second:02d}")
+        for ip in self._ip_pool:
+            ws_ex = self._ws_exchanges.get(ip)
+            if ws_ex:
+                # Sample first 3 pairs
+                sample_pairs = list(self._klines_watching)[:3]
+                for pair, tf, _ in sample_pairs:
+                    data = ws_ex.ohlcvs.get(pair, {}).get(tf, [])
+                    last_ts = data[-1][0] if data else 0
+                    last_str = datetime.fromtimestamp(last_ts / 1000).strftime('%H:%M:%S') if last_ts else 'none'
+                    age_sec = (time.time() * 1000 - last_ts) / 1000 if last_ts else -1
+                    logger.info(
+                        f"[CANDLE-CLOSE] IP={ip} state={self._ip_states.get(ip, 'unknown').value if self._ip_states.get(ip) else 'unknown'} "
+                        f"{pair}/{tf} candles={len(data)} "
+                        f"last={last_str} age={age_sec:.1f}s"
+                    )
+
     def _start_forever(self) -> None:
         self._loop = asyncio.new_event_loop()
 
@@ -223,6 +286,12 @@ class ExchangeWS:
                 # Log state periodically (every ~5 minutes)
                 if int(current_time) % 300 < 10:
                     self._log_rotation_state()
+                    self._log_metrics_summary()
+
+                # DIAGNOSTIC: Log at exact :00 boundary (:00:00 - :00:10)
+                current_second = int(current_time) % 60
+                if current_minute == 0 and current_second < 10:
+                    self._log_candle_close_state(current_minute, current_second)
 
     async def _enter_danger_zone(self, current_minute: int) -> None:
         """Enter danger zone - prepare for candle boundary."""
@@ -293,16 +362,49 @@ class ExchangeWS:
             while self._ip_states.get(ip) in (IPState.SPINNING_UP, IPState.HOT_BACKUP):
                 data = await ws_exchange.watch_ohlcv(pair, timeframe)
 
+                # DIAGNOSTIC: Log every candle update on backup IPs
+                if data:
+                    last_ts = data[-1][0]
+                    if ip in self._ip_metrics:
+                        self._ip_metrics[ip]['candles_received'] += 1
+                        self._ip_metrics[ip]['last_candle_ts'] = last_ts
+                    current_minute = int(time.time() // 60) % 60
+                    # Log at debug level normally, but info near candle boundaries
+                    if current_minute >= 58 or current_minute <= 2:
+                        logger.info(
+                            f"[BACKUP-CANDLE] IP={ip} {pair}/{timeframe} "
+                            f"candles={len(data)} last_ts={last_ts} "
+                            f"({datetime.fromtimestamp(last_ts/1000).strftime('%H:%M:%S')}) "
+                            f"minute=:{current_minute:02d}"
+                        )
+
                 if not first_message_received:
                     first_message_received = True
-                    logger.debug(
+                    logger.info(
                         f"[BACKUP-CONNECTED] First data for {pair}/{timeframe} on backup IP {ip} "
                         f"(data points: {len(data)})"
                     )
         except ccxt.ExchangeClosedByUser:
             pass  # Expected during teardown
         except ccxt.BaseError as e:
-            logger.warning(f"[BACKUP-ERROR] {pair}/{timeframe} on backup {ip}: {type(e).__name__}: {e}")
+            # DIAGNOSTIC: Log connection errors with full context
+            error_time = datetime.now().strftime('%H:%M:%S.%f')
+            current_minute = int(time.time() // 60) % 60
+            logger.error(
+                f"[WS-CONN-ERROR] :{current_minute:02d} IP={ip} {pair}/{timeframe} "
+                f"error={type(e).__name__}: {str(e)[:200]} "
+                f"state={self._ip_states.get(ip, 'unknown').value if self._ip_states.get(ip) else 'unknown'} "
+                f"at={error_time}"
+            )
+            # Track in metrics
+            if ip in self._ip_metrics:
+                self._ip_metrics[ip]['errors'].append({
+                    'time': error_time,
+                    'minute': current_minute,
+                    'pair': pair,
+                    'error': str(e)[:100]
+                })
+                self._ip_metrics[ip]['errors'] = self._ip_metrics[ip]['errors'][-10:]  # Keep last 10
 
     async def _exit_danger_zone(self, current_minute: int) -> None:
         """Exit danger zone - determine survivor and teardown others."""
@@ -621,6 +723,24 @@ class ExchangeWS:
         Priority order: ACTIVE → HOT_BACKUP → SPINNING_UP → REST fallback
         """
         try:
+            current_minute = int(time.time() // 60) % 60
+            near_boundary = current_minute >= 58 or current_minute <= 2
+
+            # DIAGNOSTIC: Log ALL IPs' data state near candle boundary
+            if near_boundary and self._ip_pool:
+                for ip in self._ip_pool:
+                    ws_ex = self._ws_exchanges.get(ip)
+                    if ws_ex:
+                        data = ws_ex.ohlcvs.get(pair, {}).get(timeframe, [])
+                        last_ts = data[-1][0] if data else 0
+                        age_sec = (time.time() * 1000 - last_ts) / 1000 if last_ts else -1
+                        logger.info(
+                            f"[OHLCV-CHECK] :{current_minute:02d} IP={ip} "
+                            f"state={self._ip_states.get(ip, 'unknown').value if self._ip_states.get(ip) else 'unknown'} "
+                            f"{pair} candles={len(data)} last_ts={last_ts} age={age_sec:.1f}s "
+                            f"fresh={self._is_data_fresh(data)}"
+                        )
+
             # Cascade through IPs in priority order
             for ip in self._get_ips_by_priority():
                 ws_exchange = self._ws_exchanges.get(ip)
@@ -630,7 +750,7 @@ class ExchangeWS:
                 data = ws_exchange.ohlcvs.get(pair, {}).get(timeframe, [])
                 if data and self._is_data_fresh(data):
                     if ip != self._active_ip:
-                        logger.debug(
+                        logger.info(
                             f"[CASCADE] Using data from {ip} (not active) for {pair}/{timeframe}"
                         )
                     return deepcopy(data)
@@ -765,14 +885,32 @@ class ExchangeWS:
         except ccxt.ExchangeClosedByUser:
             logger.info(f"[WS-CLOSED] Exchange closed by user for {pair}/{timeframe} on IP {assigned_ip}")
         except ccxt.BaseError as e:
+            # DIAGNOSTIC: Log connection errors with full context
+            error_time = datetime.now().strftime('%H:%M:%S.%f')
+            current_minute = int(time.time() // 60) % 60
+
             # Track failure statistics
             if assigned_ip in self._ip_stats:
                 self._ip_stats[assigned_ip]['failures'] += 1
                 self._ip_stats[assigned_ip]['last_failure'] = str(e)[:100]
 
             logger.error(
-                f"[WS-ERROR] {pair}/{timeframe} on IP {assigned_ip} failed: {type(e).__name__}: {e}"
+                f"[WS-CONN-ERROR] :{current_minute:02d} IP={assigned_ip} {pair}/{timeframe} "
+                f"error={type(e).__name__}: {str(e)[:200]} "
+                f"state={self._ip_states.get(assigned_ip, 'unknown').value if self._ip_states.get(assigned_ip) else 'unknown'} "
+                f"at={error_time}"
             )
+
+            # Track in metrics
+            if assigned_ip in self._ip_metrics:
+                self._ip_metrics[assigned_ip]['errors'].append({
+                    'time': error_time,
+                    'minute': current_minute,
+                    'pair': pair,
+                    'error': str(e)[:100]
+                })
+                self._ip_metrics[assigned_ip]['errors'] = self._ip_metrics[assigned_ip]['errors'][-10:]
+
             # Log IP stats after failure
             self._log_ip_stats()
 
