@@ -721,39 +721,90 @@ class ExchangeWS:
         Cascades through all IPs with data before returning empty.
 
         Priority order: ACTIVE → HOT_BACKUP → SPINNING_UP → REST fallback
+
+        Retry strategy at candle boundaries:
+        - Check 1: Immediate (at :00:01)
+        - Check 2: After 3s (at :00:04) if all stale
+        - Check 3: After 3s more (at :00:07) if still stale
+        - Check 4: After 4s more (at :00:11) if still stale
+        - Give up: Return best available data or empty (REST fallback)
         """
         try:
             current_minute = int(time.time() // 60) % 60
             near_boundary = current_minute >= 58 or current_minute <= 2
 
-            # DIAGNOSTIC: Log ALL IPs' data state near candle boundary
+            # Retry configuration: delays in seconds for each retry
+            retry_delays = [3, 3, 4]  # Total: 10 seconds max wait
+            retry_attempt = 0
+            max_retries = len(retry_delays)
+
+            while retry_attempt <= max_retries:
+                # DIAGNOSTIC: Log ALL IPs' data state near candle boundary
+                if near_boundary and self._ip_pool and retry_attempt == 0:
+                    for ip in self._ip_pool:
+                        ws_ex = self._ws_exchanges.get(ip)
+                        if ws_ex:
+                            data = ws_ex.ohlcvs.get(pair, {}).get(timeframe, [])
+                            last_ts = data[-1][0] if data else 0
+                            age_sec = (time.time() * 1000 - last_ts) / 1000 if last_ts else -1
+                            logger.info(
+                                f"[OHLCV-CHECK] :{current_minute:02d} IP={ip} "
+                                f"state={self._ip_states.get(ip, 'unknown').value if self._ip_states.get(ip) else 'unknown'} "
+                                f"{pair} candles={len(data)} last_ts={last_ts} age={age_sec:.1f}s "
+                                f"fresh={self._is_data_fresh(data)}"
+                            )
+
+                # Cascade through IPs in priority order
+                found_fresh = False
+                for ip in self._get_ips_by_priority():
+                    ws_exchange = self._ws_exchanges.get(ip)
+                    if not ws_exchange:
+                        continue
+
+                    data = ws_exchange.ohlcvs.get(pair, {}).get(timeframe, [])
+                    if data and self._is_data_fresh(data):
+                        if ip != self._active_ip:
+                            logger.info(
+                                f"[CASCADE] Using data from {ip} (not active) for {pair}/{timeframe}"
+                            )
+                        if retry_attempt > 0:
+                            logger.info(
+                                f"[CASCADE-RETRY-SUCCESS] Fresh data found after {retry_attempt} retries "
+                                f"for {pair}/{timeframe} on IP {ip}"
+                            )
+                        return deepcopy(data)
+
+                # No fresh data found in this attempt
+                if retry_attempt < max_retries and near_boundary and self._ip_pool:
+                    retry_delay = retry_delays[retry_attempt]
+                    retry_attempt += 1
+                    logger.info(
+                        f"[CASCADE-RETRY] No fresh data for {pair}/{timeframe}, "
+                        f"retry {retry_attempt}/{max_retries} after {retry_delay}s"
+                    )
+                    time.sleep(retry_delay)
+                    # Loop will retry cascade
+                else:
+                    # Max retries reached or not near boundary - stop retrying
+                    break
+
+            # All retries exhausted - return best available data as fallback
             if near_boundary and self._ip_pool:
-                for ip in self._ip_pool:
-                    ws_ex = self._ws_exchanges.get(ip)
-                    if ws_ex:
-                        data = ws_ex.ohlcvs.get(pair, {}).get(timeframe, [])
-                        last_ts = data[-1][0] if data else 0
-                        age_sec = (time.time() * 1000 - last_ts) / 1000 if last_ts else -1
-                        logger.info(
-                            f"[OHLCV-CHECK] :{current_minute:02d} IP={ip} "
-                            f"state={self._ip_states.get(ip, 'unknown').value if self._ip_states.get(ip) else 'unknown'} "
-                            f"{pair} candles={len(data)} last_ts={last_ts} age={age_sec:.1f}s "
-                            f"fresh={self._is_data_fresh(data)}"
-                        )
-
-            # Cascade through IPs in priority order
-            for ip in self._get_ips_by_priority():
-                ws_exchange = self._ws_exchanges.get(ip)
-                if not ws_exchange:
-                    continue
-
-                data = ws_exchange.ohlcvs.get(pair, {}).get(timeframe, [])
-                if data and self._is_data_fresh(data):
-                    if ip != self._active_ip:
-                        logger.info(
-                            f"[CASCADE] Using data from {ip} (not active) for {pair}/{timeframe}"
-                        )
-                    return deepcopy(data)
+                logger.warning(
+                    f"[CASCADE-RETRY-EXHAUSTED] All retries exhausted for {pair}/{timeframe}, "
+                    f"returning best available data or empty"
+                )
+                # Try to return stale data as last resort
+                for ip in self._get_ips_by_priority():
+                    ws_exchange = self._ws_exchanges.get(ip)
+                    if ws_exchange:
+                        data = ws_exchange.ohlcvs.get(pair, {}).get(timeframe, [])
+                        if data:
+                            logger.warning(
+                                f"[CASCADE-STALE-FALLBACK] Using stale data from {ip} "
+                                f"for {pair}/{timeframe} (age={(time.time() * 1000 - data[-1][0])/1000:.1f}s)"
+                            )
+                            return deepcopy(data)
 
             # Fallback to default/main exchange (no IP pool case)
             default_exchange = self._ws_exchanges.get('default', self._ccxt_object)
