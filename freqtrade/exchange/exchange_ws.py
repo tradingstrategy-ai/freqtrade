@@ -441,27 +441,45 @@ class ExchangeWS:
             if ip not in ips_to_check and self._ip_states.get(ip) == IPState.HOT_BACKUP:
                 ips_to_check.append(ip)
 
+        best_ip = None
+        best_fresh_count = 0
+
         for ip in ips_to_check:
             ws_exchange = self._ws_exchanges.get(ip)
             if not ws_exchange:
                 continue
 
-            # Sample a few pairs to check freshness
-            sample_pairs = list(self._klines_watching)[:3]
+            # Check ALL pairs (or reasonable sample of 20) to properly assess IP health
+            # Previous bug: only checked 3 pairs, missed IPs with fresh data
+            sample_size = min(20, len(self._klines_watching))
+            sample_pairs = list(self._klines_watching)[:sample_size]
             fresh_count = 0
+            total_checked = 0
+
             for p, tf, _ in sample_pairs:
                 data = ws_exchange.ohlcvs.get(p, {}).get(tf, [])
+                total_checked += 1
                 if self._is_data_fresh(data):
                     fresh_count += 1
 
-            if fresh_count > 0:
-                logger.debug(f"[SURVIVOR] IP {ip} has {fresh_count} fresh pairs")
-                return ip
-            else:
-                logger.warning(f"[SURVIVOR] IP {ip} has no fresh data")
+            fresh_pct = (fresh_count / total_checked * 100) if total_checked > 0 else 0
 
-        logger.warning("[SURVIVOR] No IP with fresh data found, returning current active")
-        return self._active_ip  # Fallback to current active
+            logger.info(
+                f"[SURVIVOR] IP {ip} has {fresh_count}/{total_checked} fresh pairs ({fresh_pct:.1f}%)"
+            )
+
+            # Track best IP (most fresh pairs)
+            if fresh_count > best_fresh_count:
+                best_fresh_count = fresh_count
+                best_ip = ip
+
+        # Promote IP with most fresh data
+        if best_ip and best_fresh_count > 0:
+            logger.info(f"[SURVIVOR] Selected {best_ip} with {best_fresh_count} fresh pairs")
+            return best_ip
+        else:
+            logger.warning("[SURVIVOR] No IP with fresh data found, returning current active")
+            return self._active_ip  # Fallback to current active
 
     async def _promote_to_active(self, ip: str) -> None:
         """Promote IP to active status."""
