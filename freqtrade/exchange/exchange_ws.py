@@ -566,6 +566,12 @@ class ExchangeWS:
         # Clear scheduled so streams get rescheduled with new exchange
         self._klines_scheduled.clear()
 
+        # Reschedule all pairs from _klines_watching on the new active IP
+        logger.info(
+            f"[ROTATION-RESCHEDULE] Rescheduling {len(self._klines_watching)} pairs on new active IP {new_active_ip}"
+        )
+        await self._schedule_while_true()
+
         # Tear down old active
         if old_active_ip and old_active_ip != new_active_ip:
             self._ip_states[old_active_ip] = IPState.TEARING_DOWN
@@ -973,7 +979,11 @@ class ExchangeWS:
                 f"[WS-STOPPED] Watch ended for {pair}/{timeframe} on IP {assigned_ip} "
                 f"(received_data: {first_message_received})"
             )
-            self._klines_watching.discard((pair, timeframe, candle_type))
+            # NOTE: Do NOT remove from _klines_watching here!
+            # _klines_watching represents the desired state (what we want to watch).
+            # When a task exits due to IP failure, we still want to watch this pair
+            # on the new active IP. Only cleanup_expired() should remove from _klines_watching.
+            # self._klines_watching.discard((pair, timeframe, candle_type))  # REMOVED
 
     def schedule_ohlcv(self, pair: str, timeframe: str, candle_type: CandleType) -> None:
         """
