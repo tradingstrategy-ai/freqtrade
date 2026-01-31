@@ -47,8 +47,15 @@ class ExchangeWS:
         self._ip_session_times: dict[str, float] = {}  # When session was last refreshed
         self._ip_connection_start: dict[str, float] = {}  # When streams started on this IP
 
+        # IP failure tracking for recovery mechanism
+        self._ip_failure_time: dict[str, float] = {}  # When IP was marked FAILED
+        self._ip_consecutive_failures: dict[str, int] = {}  # Consecutive failure count per IP
+
         # Pair-to-IP assignment cache for consistent routing
         self._pair_ip_assignment: dict[str, str] = {}
+
+        # Track last refresh time to avoid duplicate refreshes
+        self._last_periodic_refresh: float = 0
 
         # Data freshness threshold for checking stale data
         self._data_freshness_threshold_ms: int = exchange_config.get('ws_freshness_threshold', 300) * 1000
@@ -271,7 +278,9 @@ class ExchangeWS:
 
     async def _stats_monitor(self) -> None:
         """
-        Monitor pair distribution stats and log periodically.
+        Monitor pair distribution stats, log periodically, and handle:
+        - Periodic connection refresh at :20 and :50
+        - IP recovery after cooldown
         In pair distribution mode, all IPs are active simultaneously,
         each handling their assigned subset of pairs.
         """
@@ -285,6 +294,15 @@ class ExchangeWS:
 
             current_time = time.time()
             current_minute = int(current_time // 60) % 60
+
+            # Periodic connection refresh at :20 and :50 to ensure fresh connections before :00
+            if current_minute in (20, 50):
+                # Only refresh if we haven't refreshed in the last 10 minutes
+                if current_time - self._last_periodic_refresh > 600:
+                    await self._refresh_all_connections()
+
+            # Try to recover failed IPs after 5 minute cooldown
+            await self._try_recover_failed_ips()
 
             # Log comprehensive stats every minute
             if log_counter % 2 == 0:  # Every 60 seconds
@@ -397,22 +415,124 @@ class ExchangeWS:
                 f"{', '.join(sorted(pairs)[:10])}{'...' if len(pairs) > 10 else ''}"
             )
 
+    async def _refresh_all_connections(self) -> None:
+        """
+        Refresh all WebSocket connections to ensure freshness.
+        Called at :20 and :50 to ensure fresh connections before candle close at :00.
+        """
+        if not self._ip_pool:
+            return
+
+        current_minute = int(time.time() // 60) % 60
+        logger.info(f"[WS-REFRESH] Starting periodic refresh at :{current_minute:02d}")
+
+        # Close all existing connections
+        for ip, ws_exchange in self._ws_exchanges.items():
+            try:
+                await ws_exchange.close()
+                ws_exchange.ohlcvs.clear()
+                logger.debug(f"[WS-REFRESH] Closed connection for IP {ip}")
+            except Exception as e:
+                logger.warning(f"[WS-REFRESH] Error closing {ip}: {e}")
+
+        # Recreate exchange instances
+        self._ws_exchanges = self._create_ws_exchange_pool(self._ccxt_object)
+
+        # Clear pair assignments - will be re-assigned on next request
+        self._pair_ip_assignment.clear()
+
+        # Reset connection start times
+        self._ip_connection_start.clear()
+
+        # Clear scheduled pairs so they get rescheduled
+        self._klines_scheduled.clear()
+
+        # Reset IP states to active and clear failure tracking
+        for ip in self._ip_pool:
+            self._ip_states[ip] = IPState.ACTIVE
+            self._ip_session_times[ip] = time.time()
+            self._ip_consecutive_failures[ip] = 0
+            self._ip_failure_time.pop(ip, None)
+
+        # Update last refresh time
+        self._last_periodic_refresh = time.time()
+
+        logger.info(f"[WS-REFRESH] Completed - all {len(self._ip_pool)} IPs refreshed and reset to ACTIVE")
+
+    async def _try_recover_failed_ips(self) -> None:
+        """
+        Try to recover failed IPs after 5 minute cooldown.
+        This gives the IP a chance to recover from transient issues.
+        """
+        if not self._ip_pool:
+            return
+
+        current_time = time.time()
+        recovery_cooldown = 300  # 5 minutes
+
+        for ip in self._ip_pool:
+            if self._ip_states.get(ip) == IPState.FAILED:
+                failure_time = self._ip_failure_time.get(ip, 0)
+                time_since_failure = current_time - failure_time
+
+                if time_since_failure > recovery_cooldown:
+                    logger.info(
+                        f"[IP-RECOVERY] Attempting to recover IP {ip} "
+                        f"(failed {time_since_failure:.0f}s ago)"
+                    )
+
+                    try:
+                        # Recreate the exchange instance for this IP
+                        if ip in self._ws_exchanges:
+                            try:
+                                await self._ws_exchanges[ip].close()
+                            except Exception:
+                                pass
+
+                        self._ws_exchanges[ip] = self._create_single_ws_exchange(ip)
+                        self._ip_states[ip] = IPState.ACTIVE
+                        self._ip_consecutive_failures[ip] = 0
+                        self._ip_session_times[ip] = current_time
+                        self._ip_failure_time.pop(ip, None)
+
+                        logger.info(f"[IP-RECOVERY] IP {ip} recovered and set to ACTIVE")
+                    except Exception as e:
+                        logger.warning(f"[IP-RECOVERY] Failed to recover IP {ip}: {e}")
+
     async def _handle_ip_failure(self, failed_ip: str, pair: str) -> None:
         """
         Handle failure of an IP in pair distribution mode.
-        Mark IP as failed and clear assignment cache so pairs get redistributed.
+        Uses threshold (3 consecutive failures) before marking as FAILED.
+        Failed IPs can recover after 5 minute cooldown.
         """
-        if self._ip_states.get(failed_ip) == IPState.FAILED:
-            return  # Already marked as failed
+        # Increment consecutive failure count
+        self._ip_consecutive_failures[failed_ip] = self._ip_consecutive_failures.get(failed_ip, 0) + 1
+        failure_count = self._ip_consecutive_failures[failed_ip]
 
-        logger.warning(
-            f"[IP-FAILURE] IP {failed_ip} failed on pair {pair}, "
-            f"marking as FAILED and redistributing its pairs"
-        )
-
-        self._ip_states[failed_ip] = IPState.FAILED
+        # Update stats
         self._ip_stats[failed_ip]['failures'] += 1
         self._ip_stats[failed_ip]['last_failure'] = f"{pair} at {datetime.now().strftime('%H:%M:%S')}"
+
+        # Only mark as FAILED after 3+ consecutive failures
+        if failure_count < 3:
+            logger.warning(
+                f"[IP-FAILURE] IP {failed_ip} failed on {pair} "
+                f"(failure {failure_count}/3, not yet marking as FAILED)"
+            )
+            return
+
+        # Already marked as failed
+        if self._ip_states.get(failed_ip) == IPState.FAILED:
+            return
+
+        # Mark as FAILED and record time for recovery cooldown
+        self._ip_states[failed_ip] = IPState.FAILED
+        self._ip_failure_time[failed_ip] = time.time()
+
+        logger.warning(
+            f"[IP-FAILURE] IP {failed_ip} marked FAILED after {failure_count} consecutive failures "
+            f"(last pair: {pair})"
+        )
 
         # Clear pair assignments for this IP so they get reassigned to active IPs
         pairs_to_reassign = [p for p, ip in self._pair_ip_assignment.items() if ip == failed_ip]

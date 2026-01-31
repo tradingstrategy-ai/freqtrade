@@ -2514,12 +2514,33 @@ class Exchange:
     ) -> Coroutine[Any, Any, OHLCVResponse] | None:
         """
         Try to build a coroutine to get data from websocket.
+        Near candle boundaries (:58-:02), will retry up to 5 times with increasing delays
+        before falling back to REST, giving WebSocket data time to arrive.
         """
-        if self._can_use_websocket(self._exchange_ws, pair, timeframe, candle_type):
-            candle_ts = dt_ts(timeframe_to_prev_date(timeframe))
-            prev_candle_ts = dt_ts(date_minus_candles(timeframe, 1))
+        if not self._can_use_websocket(self._exchange_ws, pair, timeframe, candle_type):
+            return None
+
+        import time
+        current_minute = int(time.time() // 60) % 60
+        near_boundary = current_minute >= 58 or current_minute <= 2
+
+        # Retry configuration: more patient near candle boundaries
+        max_retries = 5 if near_boundary else 1
+        retry_delays = [1, 2, 3, 4, 5]  # Increasing delays (total 15s max)
+
+        candle_ts = dt_ts(timeframe_to_prev_date(timeframe))
+        prev_candle_ts = dt_ts(date_minus_candles(timeframe, 1))
+        half_candle = int(candle_ts - (candle_ts - prev_candle_ts) * 0.5)
+
+        # Initialize variables for final logging
+        candles = []
+        condition1 = False
+        condition2 = False
+        refresh_ok = False
+        last_refresh_time = 0
+
+        for attempt in range(max_retries):
             candles = self._exchange_ws.ohlcvs(pair, timeframe)
-            half_candle = int(candle_ts - (candle_ts - prev_candle_ts) * 0.5)
             last_refresh_time = int(
                 self._exchange_ws.klines_last_refresh.get((pair, timeframe, candle_type), 0)
             )
@@ -2530,12 +2551,10 @@ class Exchange:
             refresh_ok = last_refresh_time >= half_candle
 
             # DIAGNOSTIC: Log exactly why WS fails near candle boundaries
-            import time
-            current_minute = int(time.time() // 60) % 60
-            if current_minute >= 58 or current_minute <= 2:
+            if near_boundary:
                 last_candle_ts = candles[-1][0] if candles else 0
                 logger.info(
-                    f"[WS-EVAL] :{current_minute:02d} {pair}/{timeframe} "
+                    f"[WS-EVAL] :{current_minute:02d} {pair}/{timeframe} attempt={attempt+1}/{max_retries} "
                     f"candles={len(candles)} "
                     f"last_ts={last_candle_ts} "
                     f"expected_ts={candle_ts} "
@@ -2554,14 +2573,32 @@ class Exchange:
             ):
                 # Usable result, candle contains the previous candle.
                 # Also, we check if the last refresh time is no more than half the candle ago.
-                logger.debug(f"reuse watch result for {pair}, {timeframe}, {last_refresh_time}")
+                if attempt > 0:
+                    logger.info(
+                        f"[WS-RETRY-SUCCESS] Got fresh data for {pair}/{timeframe} "
+                        f"on attempt {attempt+1}/{max_retries}"
+                    )
+                else:
+                    logger.debug(f"reuse watch result for {pair}, {timeframe}, {last_refresh_time}")
 
                 return self._exchange_ws.get_ohlcv(pair, timeframe, candle_type, candle_ts)
-            logger.info(
-                f"[WS-FALLBACK] Couldn't reuse watch for {pair}, {timeframe}, falling back to REST api. "
-                f"candles={len(candles)} condition1={condition1} condition2={condition2} refresh_ok={refresh_ok} "
-                f"candle_ts={format_ms_time(candle_ts)} last_refresh={format_ms_time(last_refresh_time)}"
-            )
+
+            # If not last attempt and near boundary, wait and retry
+            if attempt < max_retries - 1 and near_boundary:
+                delay = retry_delays[attempt]
+                logger.info(
+                    f"[WS-RETRY] {pair}/{timeframe} data not fresh, waiting {delay}s "
+                    f"(attempt {attempt+1}/{max_retries})"
+                )
+                time.sleep(delay)
+
+        # All retries exhausted - fall back to REST
+        logger.info(
+            f"[WS-FALLBACK] {pair}/{timeframe} - no fresh data after {max_retries} attempts, "
+            f"falling back to REST api. "
+            f"candles={len(candles)} condition1={condition1} condition2={condition2} refresh_ok={refresh_ok} "
+            f"candle_ts={format_ms_time(candle_ts)} last_refresh={format_ms_time(last_refresh_time)}"
+        )
         return None
 
     def _can_use_websocket(
