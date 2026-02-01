@@ -2509,97 +2509,61 @@ class Exchange:
             self._ohlcv_partial_candle if candle_type != CandleType.FUNDING_RATE else False,
         )
 
-    def _try_build_from_websocket(
-        self, pair: str, timeframe: str, candle_type: CandleType
-    ) -> Coroutine[Any, Any, OHLCVResponse] | None:
+    async def _async_fetch_ohlcv_with_ws_retry(
+        self,
+        pair: str,
+        timeframe: str,
+        candle_type: CandleType,
+        since_ms: int | None,
+        max_ws_retries: int = 10,
+    ) -> OHLCVResponse:
         """
-        Try to build a coroutine to get data from websocket.
-        Near candle boundaries (:58-:02), will retry up to 5 times with increasing delays
-        before falling back to REST, giving WebSocket data time to arrive.
+        Fetch OHLCV data with WS-first strategy and parallel-safe async retries.
+        Tries WebSocket up to max_ws_retries times before falling back to REST.
+        All pairs can retry simultaneously (non-blocking async delays).
         """
-        if not self._can_use_websocket(self._exchange_ws, pair, timeframe, candle_type):
-            return None
-
-        import time
-        current_minute = int(time.time() // 60) % 60
-        near_boundary = current_minute >= 58 or current_minute <= 2
-
-        # Retry configuration: more patient near candle boundaries
-        max_retries = 5 if near_boundary else 1
-        retry_delays = [1, 2, 3, 4, 5]  # Increasing delays (total 15s max)
-
         candle_ts = dt_ts(timeframe_to_prev_date(timeframe))
         prev_candle_ts = dt_ts(date_minus_candles(timeframe, 1))
         half_candle = int(candle_ts - (candle_ts - prev_candle_ts) * 0.5)
 
-        # Initialize variables for final logging
-        candles = []
-        condition1 = False
-        condition2 = False
-        refresh_ok = False
-        last_refresh_time = 0
+        # Retry delays: 1, 1, 2, 2, 3, 3, 4, 4, 5, 5 = 30s total max
+        retry_delays = [1, 1, 2, 2, 3, 3, 4, 4, 5, 5]
 
-        for attempt in range(max_retries):
+        for attempt in range(max_ws_retries):
+            # Check if WS has fresh data
             candles = self._exchange_ws.ohlcvs(pair, timeframe)
-            last_refresh_time = int(
-                self._exchange_ws.klines_last_refresh.get((pair, timeframe, candle_type), 0)
+            last_refresh = self._exchange_ws.klines_last_refresh.get(
+                (pair, timeframe, candle_type), 0
             )
 
-            # Evaluate conditions separately for diagnostic logging
             condition1 = len(candles) > 1 and candles[-1][0] >= prev_candle_ts
             condition2 = len(candles) == 1 and candles[-1][0] < candle_ts
-            refresh_ok = last_refresh_time >= half_candle
+            refresh_ok = last_refresh >= half_candle
 
-            # DIAGNOSTIC: Log exactly why WS fails near candle boundaries
-            if near_boundary:
-                last_candle_ts = candles[-1][0] if candles else 0
-                logger.info(
-                    f"[WS-EVAL] :{current_minute:02d} {pair}/{timeframe} attempt={attempt+1}/{max_retries} "
-                    f"candles={len(candles)} "
-                    f"last_ts={last_candle_ts} "
-                    f"expected_ts={candle_ts} "
-                    f"prev_candle_ts={prev_candle_ts} "
-                    f"half_candle={half_candle} "
-                    f"last_refresh={last_refresh_time} "
-                    f"condition1={condition1} "
-                    f"condition2={condition2} "
-                    f"refresh_ok={refresh_ok}"
-                )
-
-            if (
-                candles
-                and (condition1 or condition2)
-                and refresh_ok
-            ):
-                # Usable result, candle contains the previous candle.
-                # Also, we check if the last refresh time is no more than half the candle ago.
+            if candles and (condition1 or condition2) and refresh_ok:
+                # WS data is valid!
                 if attempt > 0:
                     logger.info(
-                        f"[WS-RETRY-SUCCESS] Got fresh data for {pair}/{timeframe} "
-                        f"on attempt {attempt+1}/{max_retries}"
+                        f"[WS-SUCCESS] {pair}/{timeframe} got data on attempt {attempt + 1}"
                     )
-                else:
-                    logger.debug(f"reuse watch result for {pair}, {timeframe}, {last_refresh_time}")
-
-                return self._exchange_ws.get_ohlcv(pair, timeframe, candle_type, candle_ts)
-
-            # If not last attempt and near boundary, wait and retry
-            if attempt < max_retries - 1 and near_boundary:
-                delay = retry_delays[attempt]
-                logger.info(
-                    f"[WS-RETRY] {pair}/{timeframe} data not fresh, waiting {delay}s "
-                    f"(attempt {attempt+1}/{max_retries})"
+                return await self._exchange_ws.get_ohlcv(
+                    pair, timeframe, candle_type, candle_ts
                 )
-                time.sleep(delay)
 
-        # All retries exhausted - fall back to REST
+            # Not ready yet - wait and retry (non-blocking)
+            if attempt < max_ws_retries - 1:
+                delay = retry_delays[attempt]
+                logger.debug(
+                    f"[WS-WAIT] {pair}/{timeframe} attempt {attempt + 1}/{max_ws_retries}, "
+                    f"waiting {delay}s"
+                )
+                await asyncio.sleep(delay)
+
+        # All WS retries exhausted - fall back to REST
         logger.info(
-            f"[WS-FALLBACK] {pair}/{timeframe} - no fresh data after {max_retries} attempts, "
-            f"falling back to REST api. "
-            f"candles={len(candles)} condition1={condition1} condition2={condition2} refresh_ok={refresh_ok} "
-            f"candle_ts={format_ms_time(candle_ts)} last_refresh={format_ms_time(last_refresh_time)}"
+            f"[REST-FALLBACK] {pair}/{timeframe} after {max_ws_retries} WS attempts"
         )
-        return None
+        return await self._async_get_candle_history(pair, timeframe, candle_type, since_ms)
 
     def _can_use_websocket(
         self, exchange_ws: ExchangeWS | None, pair: str, timeframe: str, candle_type: CandleType
@@ -2621,18 +2585,21 @@ class Exchange:
         cache: bool,
     ) -> Coroutine[Any, Any, OHLCVResponse]:
         not_all_data = cache and self.required_candle_call_count > 1
-        if cache:
-            if self._can_use_websocket(self._exchange_ws, pair, timeframe, candle_type):
-                # Subscribe to websocket
-                self._exchange_ws.schedule_ohlcv(pair, timeframe, candle_type)
+
+        # Subscribe to WebSocket stream if available
+        if cache and self._can_use_websocket(self._exchange_ws, pair, timeframe, candle_type):
+            self._exchange_ws.schedule_ohlcv(pair, timeframe, candle_type)
+
+            # Use async WS retry - handles WS/REST decision inside async execution
+            # All pairs retry in parallel (non-blocking async delays)
+            if (pair, timeframe, candle_type) in self._klines:
+                return self._async_fetch_ohlcv_with_ws_retry(
+                    pair, timeframe, candle_type, since_ms, max_ws_retries=10
+                )
 
         if cache and (pair, timeframe, candle_type) in self._klines:
             candle_limit = self.ohlcv_candle_limit(timeframe, candle_type)
             min_ts = dt_ts(date_minus_candles(timeframe, candle_limit - 5))
-
-            if ws_resp := self._try_build_from_websocket(pair, timeframe, candle_type):
-                # We have a usable websocket response
-                return ws_resp
 
             # Check if 1 call can get us updated candles without hole in the data.
             if min_ts < self._pairs_last_refresh_time.get((pair, timeframe, candle_type), 0):
