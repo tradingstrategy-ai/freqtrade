@@ -127,9 +127,9 @@ class ExchangeWS:
 
     def _get_ws_exchange_for_pair(self, pair: str) -> tuple[ccxt.Exchange, str]:
         """
-        Get the WebSocket exchange for a pair using consistent hash distribution.
-        Each pair is permanently assigned to one IP based on hash of pair name.
-        With 5 IPs and 75 pairs, each IP handles ~15 pairs.
+        Get the WebSocket exchange for a pair using least-loaded distribution.
+        New pairs are assigned to the IP with fewest current assignments,
+        ensuring even distribution across all IPs.
         """
         if not self._ip_pool:
             return self._ws_exchanges.get('default', self._ccxt_object), 'default'
@@ -153,9 +153,15 @@ class ExchangeWS:
             logger.error("[IP-POOL] No active IPs available! Falling back to default exchange.")
             return self._ws_exchanges.get('default', self._ccxt_object), 'default'
 
-        # Consistent hash assignment: same pair always goes to same IP (unless IP fails)
-        ip_index = hash(pair) % len(active_ips)
-        assigned_ip = active_ips[ip_index]
+        # Count current assignments per active IP
+        ip_counts = {ip: 0 for ip in active_ips}
+        for assigned_pair, assigned_ip in self._pair_ip_assignment.items():
+            if assigned_ip in ip_counts:
+                ip_counts[assigned_ip] += 1
+
+        # Assign to IP with fewest pairs (least-loaded distribution)
+        assigned_ip = min(ip_counts, key=ip_counts.get)
+        current_count = ip_counts[assigned_ip]
 
         # Log new assignment
         was_reassigned = pair in self._pair_ip_assignment
@@ -167,12 +173,12 @@ class ExchangeWS:
         if was_reassigned:
             logger.info(
                 f"[PAIR-ASSIGN] {pair} reassigned: {old_ip} -> {assigned_ip} "
-                f"(active IPs: {len(active_ips)})"
+                f"(now has {current_count + 1} pairs)"
             )
         else:
-            logger.info(
-                f"[PAIR-ASSIGN] {pair} assigned to IP {assigned_ip} "
-                f"(hash index {ip_index}/{len(active_ips)})"
+            logger.debug(
+                f"[PAIR-ASSIGN] {pair} -> {assigned_ip} "
+                f"(least-loaded, now has {current_count + 1} pairs)"
             )
 
         return self._ws_exchanges[assigned_ip], assigned_ip
@@ -864,7 +870,8 @@ class ExchangeWS:
         self._klines_watching.add(paircomb)
         self.klines_last_request[paircomb] = dt_ts()
         asyncio.run_coroutine_threadsafe(self._schedule_while_true(), loop=self._loop)
-        self.cleanup_expired()
+        # NOTE: cleanup_expired() removed - periodic refresh at :20/:50 handles
+        # connection lifecycle. Pairs are naturally managed by pairlist updates.
 
     async def get_ohlcv(
         self,
