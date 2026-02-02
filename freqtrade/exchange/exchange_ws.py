@@ -7,6 +7,7 @@ from enum import Enum
 from functools import partial
 from threading import Thread
 
+import aiohttp
 import ccxt
 
 from freqtrade.constants import Config, PairWithTimeframe
@@ -51,6 +52,12 @@ class ExchangeWS:
         self._ip_failure_time: dict[str, float] = {}  # When IP was marked FAILED
         self._ip_consecutive_failures: dict[str, int] = {}  # Consecutive failure count per IP
 
+        # Exponential backoff tracking per IP for reconnection
+        self._ip_backoff_delay: dict[str, float] = {}  # Current backoff delay per IP
+
+        # Desired subscriptions for auto-resubscribe after recovery
+        self._desired_subscriptions: set[PairWithTimeframe] = set()
+
         # Pair-to-IP assignment cache for consistent routing
         self._pair_ip_assignment: dict[str, str] = {}
 
@@ -60,12 +67,22 @@ class ExchangeWS:
         # Data freshness threshold for checking stale data
         self._data_freshness_threshold_ms: int = exchange_config.get('ws_freshness_threshold', 300) * 1000
 
+        # Configurable failure thresholds
+        self._failure_threshold: int = exchange_config.get('ws_failure_threshold', 3)
+        self._recovery_cooldown: int = exchange_config.get('ws_recovery_cooldown', 300)
+        self._backoff_max: float = exchange_config.get('ws_backoff_max', 30.0)
+
         # Create dedicated CCXT exchange instances for each IP
         self._ws_exchanges: dict[str, ccxt.Exchange] = {}
         self._ip_stats: dict[str, dict] = {}
 
         # Diagnostic metrics per IP
         self._ip_metrics: dict[str, dict] = {}
+
+        # Wallet address for rate limit queries (Hyperliquid-specific)
+        self._wallet_address: str = exchange_config.get('walletAddress', '')
+        if not self._wallet_address and hasattr(ccxt_object, 'walletAddress'):
+            self._wallet_address = ccxt_object.walletAddress or ''
 
         if self._ip_pool:
             self._ws_exchanges = self._create_ws_exchange_pool(ccxt_object)
@@ -285,7 +302,7 @@ class ExchangeWS:
     async def _stats_monitor(self) -> None:
         """
         Monitor pair distribution stats, log periodically, and handle:
-        - Periodic connection refresh at :20 and :50
+        - Periodic connection refresh at :20 (40 min before candle boundary)
         - IP recovery after cooldown
         In pair distribution mode, all IPs are active simultaneously,
         each handling their assigned subset of pairs.
@@ -301,10 +318,13 @@ class ExchangeWS:
             current_time = time.time()
             current_minute = int(current_time // 60) % 60
 
-            # Periodic connection refresh at :20 and :50 to ensure fresh connections before :00
-            if current_minute in (20, 50):
-                # Only refresh if we haven't refreshed in the last 10 minutes
-                if current_time - self._last_periodic_refresh > 600:
+            # Periodic connection refresh at :20 to ensure fresh connections before :00
+            # NOTE: Only refresh at :20, NOT :50. The :50 refresh is too close to the :00
+            # candle boundary - connections take 25-60s to get first message, leaving
+            # insufficient buffer time. The :20 refresh provides 40 minutes of margin.
+            if current_minute == 20:
+                # Only refresh if we haven't refreshed in the last 30 minutes
+                if current_time - self._last_periodic_refresh > 1800:
                     await self._refresh_all_connections()
 
             # Try to recover failed IPs after 5 minute cooldown
@@ -314,10 +334,12 @@ class ExchangeWS:
             if log_counter % 2 == 0:  # Every 60 seconds
                 self._log_comprehensive_ip_health()
 
-            # Log distribution state every 5 minutes
+            # Log distribution state and check rate limits every 5 minutes
             if log_counter % 10 == 0:  # Every 5 minutes
                 self._log_distribution_state()
                 self._log_metrics_summary()
+                # Check rate limits per IP (Hyperliquid-specific)
+                await self._check_rate_limits_per_ip()
 
             # Log detailed stats every 15 minutes
             if log_counter % 30 == 0:  # Every 15 minutes
@@ -421,10 +443,92 @@ class ExchangeWS:
                 f"{', '.join(sorted(pairs)[:10])}{'...' if len(pairs) > 10 else ''}"
             )
 
+    async def _check_rate_limits_per_ip(self) -> None:
+        """
+        Query Hyperliquid API for rate limit consumption from EACH IP.
+        This helps diagnose which IPs are approaching rate limits.
+        Runs all IP checks in parallel using asyncio.gather().
+        """
+        if not self._ip_pool:
+            return
+
+        # Only run for Hyperliquid - other exchanges have different rate limit APIs
+        exchange_name = self.config.get('exchange', {}).get('name', '').lower()
+        if exchange_name != 'hyperliquid':
+            return
+
+        if not self._wallet_address:
+            logger.debug("[RATE-LIMIT] No wallet address configured, skipping rate limit check")
+            return
+
+        async def check_single_ip(ip: str) -> None:
+            """Check rate limit for a single IP."""
+            try:
+                # Create connector bound to this specific IP
+                connector = aiohttp.TCPConnector(local_addr=(ip, 0))
+                timeout = aiohttp.ClientTimeout(total=10)
+
+                async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+                    async with session.post(
+                        "https://api.hyperliquid.xyz/info",
+                        json={"type": "userRateLimit", "user": self._wallet_address},
+                        headers={"Content-Type": "application/json"}
+                    ) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+
+                            n_requests_used = data.get('nRequestsUsed', 0)
+                            n_requests_cap = data.get('nRequestsCap', 0)
+                            n_requests_surplus = data.get('nRequestsSurplus', 0)
+                            cum_vlm = data.get('cumVlm', '0')
+
+                            # Calculate usage percentage
+                            usage_pct = (n_requests_used / max(n_requests_cap, 1)) * 100
+
+                            # Store in metrics
+                            if ip in self._ip_metrics:
+                                self._ip_metrics[ip]['rate_limit'] = {
+                                    'nRequestsUsed': n_requests_used,
+                                    'nRequestsCap': n_requests_cap,
+                                    'nRequestsSurplus': n_requests_surplus,
+                                    'cumVlm': cum_vlm,
+                                    'usage_pct': usage_pct,
+                                    'checked_at': datetime.now().strftime('%H:%M:%S')
+                                }
+
+                            logger.info(
+                                f"[RATE-LIMIT] IP={ip} "
+                                f"used={n_requests_used}/{n_requests_cap} "
+                                f"({usage_pct:.1f}%) surplus={n_requests_surplus}"
+                            )
+
+                            # Warn if approaching limit
+                            if usage_pct > 80:
+                                logger.warning(
+                                    f"[RATE-LIMIT] IP={ip} approaching limit ({usage_pct:.1f}%)"
+                                )
+                        else:
+                            logger.warning(
+                                f"[RATE-LIMIT] IP={ip} rate limit query failed: HTTP {resp.status}"
+                            )
+
+            except asyncio.TimeoutError:
+                logger.warning(f"[RATE-LIMIT] IP={ip} rate limit query timed out")
+            except Exception as e:
+                logger.warning(f"[RATE-LIMIT] IP={ip} rate limit query error: {e}")
+
+        # Get active IPs and run all checks in parallel
+        active_ips = [ip for ip in self._ip_pool if self._ip_states.get(ip) == IPState.ACTIVE]
+        if active_ips:
+            logger.info(f"[RATE-LIMIT] Checking rate limits for {len(active_ips)} IPs in parallel...")
+            await asyncio.gather(*[check_single_ip(ip) for ip in active_ips], return_exceptions=True)
+
     async def _refresh_all_connections(self) -> None:
         """
         Refresh all WebSocket connections to ensure freshness.
-        Called at :20 and :50 to ensure fresh connections before candle close at :00.
+        Called at :20 to ensure fresh connections before candle close at :00.
+        The 40-minute buffer allows connections time to stabilize (first message
+        can take 25-60 seconds to arrive).
         """
         if not self._ip_pool:
             return
@@ -458,6 +562,7 @@ class ExchangeWS:
             self._ip_states[ip] = IPState.ACTIVE
             self._ip_session_times[ip] = time.time()
             self._ip_consecutive_failures[ip] = 0
+            self._ip_backoff_delay[ip] = 0  # Reset backoff on refresh
             self._ip_failure_time.pop(ip, None)
 
         # Update last refresh time
@@ -470,8 +575,8 @@ class ExchangeWS:
             logger.info(
                 f"[WS-REFRESH] Re-scheduling {len(watched_pairs)} watched pairs after refresh"
             )
-            # Trigger scheduling for all watched pairs
-            asyncio.run_coroutine_threadsafe(self._schedule_while_true(), loop=self._loop)
+            # Trigger scheduling for all watched pairs (already in async context)
+            await self._schedule_while_true()
 
         logger.info(f"[WS-REFRESH] Completed - all {len(self._ip_pool)} IPs refreshed and reset to ACTIVE")
 
@@ -479,19 +584,19 @@ class ExchangeWS:
         """
         Try to recover failed IPs after 5 minute cooldown.
         This gives the IP a chance to recover from transient issues.
+        After recovery, re-schedules pairs that were on this IP.
         """
         if not self._ip_pool:
             return
 
         current_time = time.time()
-        recovery_cooldown = 300  # 5 minutes
 
         for ip in self._ip_pool:
             if self._ip_states.get(ip) == IPState.FAILED:
                 failure_time = self._ip_failure_time.get(ip, 0)
                 time_since_failure = current_time - failure_time
 
-                if time_since_failure > recovery_cooldown:
+                if time_since_failure > self._recovery_cooldown:
                     logger.info(
                         f"[IP-RECOVERY] Attempting to recover IP {ip} "
                         f"(failed {time_since_failure:.0f}s ago)"
@@ -508,10 +613,33 @@ class ExchangeWS:
                         self._ws_exchanges[ip] = self._create_single_ws_exchange(ip)
                         self._ip_states[ip] = IPState.ACTIVE
                         self._ip_consecutive_failures[ip] = 0
+                        self._ip_backoff_delay[ip] = 0  # Reset backoff on recovery
                         self._ip_session_times[ip] = current_time
                         self._ip_failure_time.pop(ip, None)
 
                         logger.info(f"[IP-RECOVERY] IP {ip} recovered and set to ACTIVE")
+
+                        # Re-schedule pairs that need an IP assignment
+                        # After IP failure, pair assignments are cleared, so look for
+                        # desired subscriptions that are NOT currently scheduled
+                        pairs_to_reschedule = [
+                            p for p in self._desired_subscriptions
+                            if p not in self._klines_scheduled
+                        ]
+
+                        if pairs_to_reschedule:
+                            for p in pairs_to_reschedule:
+                                # Allow re-scheduling by removing from scheduled set
+                                self._klines_scheduled.discard(p)
+
+                            logger.info(
+                                f"[IP-RECOVERY] Re-scheduling {len(pairs_to_reschedule)} pairs "
+                                f"after IP {ip} recovery"
+                            )
+
+                            # Trigger rescheduling
+                            await self._schedule_while_true()
+
                     except Exception as e:
                         logger.warning(f"[IP-RECOVERY] Failed to recover IP {ip}: {e}")
 
@@ -529,11 +657,11 @@ class ExchangeWS:
         self._ip_stats[failed_ip]['failures'] += 1
         self._ip_stats[failed_ip]['last_failure'] = f"{pair} at {datetime.now().strftime('%H:%M:%S')}"
 
-        # Only mark as FAILED after 3+ consecutive failures
-        if failure_count < 3:
+        # Only mark as FAILED after configured threshold of consecutive failures
+        if failure_count < self._failure_threshold:
             logger.warning(
                 f"[IP-FAILURE] IP {failed_ip} failed on {pair} "
-                f"(failure {failure_count}/3, not yet marking as FAILED)"
+                f"(failure {failure_count}/{self._failure_threshold}, not yet marking as FAILED)"
             )
             return
 
@@ -695,6 +823,9 @@ class ExchangeWS:
             if last_refresh > 0 and (dt_ts() - last_refresh) > ((timeframe_s + 20) * 1000):
                 logger.info(f"Removing {p} from websocket watchlist.")
                 self._klines_watching.discard(p)
+                # NOTE: Do NOT remove from _desired_subscriptions here.
+                # Stale entries are harmless (won't be scheduled since not in _klines_watching)
+                # and removing could break recovery if schedule_ohlcv isn't called frequently.
                 # Pop history to avoid getting stale data
                 self._pop_history(p)
                 changed = True
@@ -779,6 +910,17 @@ class ExchangeWS:
     ) -> None:
         first_message_received = False
         message_count = 0
+        connect_start = time.time()  # For TTFM tracking
+
+        # Apply exponential backoff if there's a pending delay for this IP
+        backoff = self._ip_backoff_delay.get(assigned_ip, 0)
+        if backoff > 0:
+            logger.info(
+                f"[WS-BACKOFF] Applying {backoff:.1f}s backoff delay for IP {assigned_ip} "
+                f"before connecting {pair}/{timeframe}"
+            )
+            await asyncio.sleep(backoff)
+
         try:
             logger.info(
                 f"[WS-CONNECT-START] Opening WebSocket for {pair}/{timeframe} on IP {assigned_ip} "
@@ -798,9 +940,25 @@ class ExchangeWS:
 
                 if not first_message_received:
                     first_message_received = True
+
+                    # Calculate and log Time-to-First-Message (TTFM)
+                    ttfm = time.time() - connect_start
+                    logger.info(
+                        f"[WS-TTFM] {pair}/{timeframe} IP={assigned_ip} time_to_first_message={ttfm:.2f}s"
+                    )
+
                     # Track connection time for this IP
                     if assigned_ip not in self._ip_connection_start and assigned_ip in self._ip_pool:
                         self._ip_connection_start[assigned_ip] = time.time()
+
+                    # Reset backoff on successful connection
+                    if assigned_ip in self._ip_backoff_delay and self._ip_backoff_delay[assigned_ip] > 0:
+                        logger.info(f"[WS-BACKOFF] IP={assigned_ip} backoff reset after successful connection")
+                        self._ip_backoff_delay[assigned_ip] = 0
+
+                    # Reset consecutive failures on success
+                    if assigned_ip in self._ip_consecutive_failures:
+                        self._ip_consecutive_failures[assigned_ip] = 0
 
                     last_ts = data[-1][0] if data else 0
                     last_time_str = datetime.fromtimestamp(last_ts / 1000).strftime('%H:%M:%S') if last_ts else 'N/A'
@@ -838,11 +996,21 @@ class ExchangeWS:
                 self._ip_stats[assigned_ip]['failures'] += 1
                 self._ip_stats[assigned_ip]['last_failure'] = str(e)[:100]
 
+            # Increase exponential backoff: 1s -> 2s -> 4s -> 8s -> max (configurable, default 30s)
+            current_backoff = self._ip_backoff_delay.get(assigned_ip, 0.5)
+            new_backoff = min(current_backoff * 2, self._backoff_max)
+            self._ip_backoff_delay[assigned_ip] = new_backoff
+            failure_count = self._ip_consecutive_failures.get(assigned_ip, 0) + 1
+
             logger.error(
                 f"[WS-CONN-ERROR] :{current_minute:02d} IP={assigned_ip} {pair}/{timeframe} "
                 f"error={type(e).__name__}: {str(e)[:200]} "
                 f"state={self._ip_states.get(assigned_ip, 'unknown').value if self._ip_states.get(assigned_ip) else 'unknown'} "
                 f"at={error_time}"
+            )
+
+            logger.warning(
+                f"[WS-BACKOFF] IP={assigned_ip} backoff_delay={new_backoff:.1f}s after {failure_count} failures"
             )
 
             # Track in metrics
@@ -878,9 +1046,11 @@ class ExchangeWS:
         """
         paircomb = (pair, timeframe, candle_type)
         self._klines_watching.add(paircomb)
+        # Track in desired subscriptions for auto-resubscribe after recovery
+        self._desired_subscriptions.add(paircomb)
         self.klines_last_request[paircomb] = dt_ts()
         asyncio.run_coroutine_threadsafe(self._schedule_while_true(), loop=self._loop)
-        # NOTE: cleanup_expired() removed - periodic refresh at :20/:50 handles
+        # NOTE: cleanup_expired() removed - periodic refresh at :20 handles
         # connection lifecycle. Pairs are naturally managed by pairlist updates.
 
     async def get_ohlcv(

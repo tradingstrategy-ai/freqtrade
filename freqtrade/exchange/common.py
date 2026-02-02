@@ -5,6 +5,8 @@ from collections.abc import Callable
 from functools import wraps
 from typing import Any, TypeVar, cast, overload
 
+import ccxt
+
 from freqtrade.exceptions import DDosProtection, RetryableOrderError, TemporaryError
 from freqtrade.mixins import LoggingMixin
 
@@ -116,6 +118,22 @@ def retrier_async(f):
         kucoin = args[0].name == "KuCoin"  # Check if the exchange is KuCoin.
         try:
             return await f(*args, **kwargs)
+        except ccxt.RateLimitExceeded as ex:
+            # Handle rate limit exceeded with doubled backoff
+            msg = f'{f.__name__}() returned RateLimitExceeded: "{ex}". '
+            if count > 0:
+                msg += f"Retrying still for {count} times."
+                count -= 1
+                kwargs["count"] = count
+                # Double the backoff for rate limit errors to reduce hammering
+                backoff_delay = calculate_backoff(count + 1, API_RETRY_COUNT) * 2
+                logger.info(f"Applying RateLimitExceeded backoff delay: {backoff_delay}s")
+                await asyncio.sleep(backoff_delay)
+                logger.warning(msg)
+                return await wrapper(*args, **kwargs)
+            else:
+                logger.warning(msg + "Giving up.")
+                raise TemporaryError(f"RateLimitExceeded: {ex}") from ex
         except TemporaryError as ex:
             msg = f'{f.__name__}() returned exception: "{ex}". '
             if count > 0:
