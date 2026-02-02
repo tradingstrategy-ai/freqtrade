@@ -12,8 +12,10 @@ _SENSITIVE_KEYS = [
     "exchange.uid",
     "exchange.account_id",
     "exchange.accountId",
-    "exchange.wallet_address",
-    "exchange.walletAddress",
+    # Note: wallet_address/walletAddress are public blockchain addresses, not secrets.
+    # They're needed for rate limit monitoring even in dry_run mode.
+    # "exchange.wallet_address",
+    # "exchange.walletAddress",
     "exchange.private_key",
     "exchange.privateKey",
     "telegram.token",
