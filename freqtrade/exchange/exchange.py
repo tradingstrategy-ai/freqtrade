@@ -2854,6 +2854,11 @@ class Exchange:
                     limit=candle_limit,
                     since_ms=since_ms,
                 )
+            # Track REST API weight consumption (candleSnapshot = 20 + items/60)
+            if self._exchange_ws and data:
+                weight = 20 + (len(data) // 60)
+                self._exchange_ws._record_ip_weight("REST_PROXY", weight)
+
             # Some exchanges sort OHLCV in ASC order and others in DESC.
             # Only sort if necessary to save computing time
             try:

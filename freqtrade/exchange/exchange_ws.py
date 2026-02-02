@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime
 from enum import Enum
@@ -71,6 +72,12 @@ class ExchangeWS:
         self._failure_threshold: int = exchange_config.get('ws_failure_threshold', 3)
         self._recovery_cooldown: int = exchange_config.get('ws_recovery_cooldown', 300)
         self._backoff_max: float = exchange_config.get('ws_backoff_max', 30.0)
+
+        # Per-IP rate limit tracking (1200 weight/minute budget per Hyperliquid docs)
+        self._ip_weight_budget: int = 1200  # Per-IP per-minute limit
+        self._ip_weight_window: int = 60    # Window size in seconds
+        # Track (timestamp, weight) tuples per IP for sliding window calculation
+        self._ip_weight_history: dict[str, list[tuple[float, int]]] = defaultdict(list)
 
         # Create dedicated CCXT exchange instances for each IP
         self._ws_exchanges: dict[str, ccxt.Exchange] = {}
@@ -349,7 +356,9 @@ class ExchangeWS:
             if log_counter % 10 == 0:  # Every 5 minutes
                 self._log_distribution_state()
                 self._log_metrics_summary()
-                # Check rate limits per IP (Hyperliquid-specific)
+                # Log tracked weight usage per IP
+                self._log_ip_weight_status()
+                # Check rate limits per IP via API (Hyperliquid-specific)
                 await self._check_rate_limits_per_ip()
 
             # Log detailed stats every 15 minutes
@@ -391,9 +400,20 @@ class ExchangeWS:
                             age_sec = (current_time * 1000 - last_ts) / 1000
                             freshness_info.append((pair, tf, age_sec))
 
-            # Calculate average data age
-            avg_age = sum(f[2] for f in freshness_info) / len(freshness_info) if freshness_info else -1
-            stale_count = sum(1 for f in freshness_info if f[2] > 300)  # >5 min is stale
+            # Calculate average data age (only for 1h candles to avoid 4h skewing the average)
+            freshness_1h = [f for f in freshness_info if f[1] == '1h']
+            avg_age = sum(f[2] for f in freshness_1h) / len(freshness_1h) if freshness_1h else -1
+
+            # Count stale streams - threshold depends on timeframe
+            # 1h candles: stale if >65 min old (allowing 5 min buffer after hour)
+            # 4h candles: stale if >245 min old (allowing 5 min buffer after 4h)
+            def is_stale(pair: str, tf: str, age_sec: float) -> bool:
+                if tf == '4h':
+                    return age_sec > 14700  # 4h + 5min = 245 min
+                else:
+                    return age_sec > 3900   # 1h + 5min = 65 min
+
+            stale_count = sum(1 for p, tf, age in freshness_info if is_stale(p, tf, age))
 
             # Connection uptime
             uptime_sec = current_time - self._ip_connection_start.get(ip, current_time)
@@ -454,6 +474,95 @@ class ExchangeWS:
                 f"{', '.join(sorted(pairs)[:10])}{'...' if len(pairs) > 10 else ''}"
             )
 
+    def _record_ip_weight(self, ip: str, weight: int) -> None:
+        """Record a request weight for an IP and prune old entries."""
+        now = time.time()
+        cutoff = now - self._ip_weight_window
+
+        # Add new entry
+        self._ip_weight_history[ip].append((now, weight))
+
+        # Prune entries older than window
+        self._ip_weight_history[ip] = [
+            (ts, w) for ts, w in self._ip_weight_history[ip]
+            if ts > cutoff
+        ]
+
+    def _get_ip_weight_usage(self, ip: str) -> tuple[int, float]:
+        """Get current weight usage for an IP within the sliding window.
+
+        Returns:
+            (current_weight, percentage_used)
+        """
+        now = time.time()
+        cutoff = now - self._ip_weight_window
+
+        # Sum weights in current window
+        current_weight = sum(
+            w for ts, w in self._ip_weight_history.get(ip, [])
+            if ts > cutoff
+        )
+
+        pct = (current_weight / self._ip_weight_budget) * 100
+        return current_weight, pct
+
+    def _calculate_request_weight(self, request_type: str, response_items: int = 0) -> int:
+        """Calculate weight for a request type based on Hyperliquid docs.
+
+        Reference: https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/rate-limits
+        """
+        # Fixed-weight endpoints
+        fixed_weights = {
+            'l2Book': 2, 'allMids': 2, 'clearinghouseState': 2,
+            'orderStatus': 2, 'spotClearinghouseState': 2,
+            'exchangeStatus': 2, 'userRole': 60, 'explorer': 40,
+            'userRateLimit': 2,  # Our rate limit check
+        }
+
+        if request_type in fixed_weights:
+            return fixed_weights[request_type]
+
+        # Variable-weight endpoints (base + items/divisor)
+        variable_weights = {
+            'candleSnapshot': (20, 60),
+            'recentTrades': (20, 20),
+            'historicalOrders': (20, 20),
+            'userFills': (20, 20),
+            'userFillsByTime': (20, 20),
+            'fundingHistory': (20, 20),
+            'userFunding': (20, 20),
+            'twapHistory': (20, 20),
+        }
+
+        if request_type in variable_weights:
+            base, divisor = variable_weights[request_type]
+            return base + (response_items // divisor)
+
+        # Default for other info requests
+        return 20
+
+    def _log_ip_weight_status(self) -> None:
+        """Log current rate limit weight usage for all IPs and REST proxy."""
+        # Log REST proxy consumption (all REST calls go through single proxy)
+        rest_usage, rest_pct = self._get_ip_weight_usage("REST_PROXY")
+        if rest_usage > 0:
+            logger.info(f"[REST-WEIGHT] REST_PROXY={rest_usage}/{self._ip_weight_budget}({rest_pct:.0f}%)")
+            if rest_pct > 70:
+                logger.warning(f"[REST-WEIGHT-HIGH] REST proxy at {rest_pct:.0f}% of rate limit budget")
+
+        # Log WebSocket IP consumption (direct connections)
+        if not self._ip_pool:
+            return
+
+        weight_status = []
+        for ip in self._ip_pool:
+            usage, pct = self._get_ip_weight_usage(ip)
+            weight_status.append(f"{ip}={usage}/{self._ip_weight_budget}({pct:.0f}%)")
+            if pct > 70:
+                logger.warning(f"[IP-WEIGHT-HIGH] IP={ip} at {pct:.0f}% of rate limit budget")
+
+        logger.info(f"[IP-WEIGHT] {' | '.join(weight_status)}")
+
     async def _check_rate_limits_per_ip(self) -> None:
         """
         Query Hyperliquid API for rate limit consumption from EACH IP.
@@ -485,6 +594,9 @@ class ExchangeWS:
                         json={"type": "userRateLimit", "user": self._wallet_address},
                         headers={"Content-Type": "application/json"}
                     ) as resp:
+                        # Track this request's weight (userRateLimit = 2 weight)
+                        self._record_ip_weight(ip, self._calculate_request_weight('userRateLimit'))
+
                         if resp.status == 200:
                             data = await resp.json()
 
