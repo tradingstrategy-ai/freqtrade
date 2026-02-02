@@ -463,6 +463,16 @@ class ExchangeWS:
         # Update last refresh time
         self._last_periodic_refresh = time.time()
 
+        # Re-schedule all pairs that were being watched
+        # This ensures WS subscriptions are re-established immediately after refresh
+        watched_pairs = list(self._klines_watching)
+        if watched_pairs:
+            logger.info(
+                f"[WS-REFRESH] Re-scheduling {len(watched_pairs)} watched pairs after refresh"
+            )
+            # Trigger scheduling for all watched pairs
+            asyncio.run_coroutine_threadsafe(self._schedule_while_true(), loop=self._loop)
+
         logger.info(f"[WS-REFRESH] Completed - all {len(self._ip_pool)} IPs refreshed and reset to ACTIVE")
 
     async def _try_recover_failed_ips(self) -> None:
