@@ -259,6 +259,55 @@ class ExchangeWS:
             f"Per-IP: {pairs_per_ip} | States: {states}"
         )
 
+    # =====================================================================
+    # Public API for REST fallback IP routing
+    # =====================================================================
+
+    def get_ip_for_pair(self, pair: str) -> str | None:
+        """Get the IP assigned to a pair for consistent routing.
+
+        Used by REST fallback to route requests through the same IP as WebSocket.
+        Returns None if pair not assigned or no IP pool configured.
+        """
+        if not self._ip_pool:
+            return None
+        return self._pair_ip_assignment.get(pair)
+
+    def get_exchange_for_pair(self, pair: str) -> ccxt.Exchange | None:
+        """Get the CCXT exchange instance bound to this pair's assigned IP.
+
+        Reuses the same instances used for WebSocket - they're bound to an IP
+        via local_addr and work for any CCXT call (WebSocket or REST).
+
+        Returns None if pair not assigned or no IP pool configured.
+        """
+        ip = self._pair_ip_assignment.get(pair)
+        if not ip:
+            return None
+        return self._ws_exchanges.get(ip)
+
+    def assign_pair_to_ip(self, pair: str) -> str | None:
+        """Assign a pair to an IP if not already assigned.
+
+        Uses least-loaded distribution strategy (same as WebSocket).
+        Returns the assigned IP, or None if no IP pool configured.
+
+        This should be called before REST candle fetching to ensure
+        even distribution across IPs from startup.
+        """
+        if not self._ip_pool:
+            return None
+
+        # Already assigned - return existing
+        if pair in self._pair_ip_assignment:
+            return self._pair_ip_assignment[pair]
+
+        # Use existing logic from _get_ws_exchange_for_pair
+        _, assigned_ip = self._get_ws_exchange_for_pair(pair)
+        return assigned_ip if assigned_ip != 'default' else None
+
+    # =====================================================================
+
     def _log_metrics_summary(self) -> None:
         """Log comprehensive metrics for all IPs - for candle boundary analysis."""
         if not self._ip_pool:
