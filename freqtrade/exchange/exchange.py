@@ -2850,11 +2850,17 @@ class Exchange:
             if candle_type and candle_type not in (CandleType.SPOT, CandleType.FUTURES):
                 params.update({"price": candle_type.value})
             if candle_type != CandleType.FUNDING_RATE:
-                # NOTE: Cannot reuse WS exchange instances for REST - they run in different
-                # event loops which causes "Future attached to different loop" errors.
-                # REST continues using self._api_async, but we track weight against the
-                # assigned IP for monitoring purposes.
-                data = await self._api_async.fetch_ohlcv(
+                # Use IP-bound exchange for REST if available (same IP as WebSocket)
+                api = self._api_async
+                used_ip = None
+                if self._exchange_ws:
+                    ip_exchange = self._exchange_ws.get_exchange_for_pair(pair)
+                    if ip_exchange:
+                        api = ip_exchange
+                        used_ip = self._exchange_ws.get_ip_for_pair(pair)
+                        logger.debug(f"[REST-FALLBACK] {pair} using IP={used_ip}")
+
+                data = await api.fetch_ohlcv(
                     pair, timeframe=timeframe, since=since_ms, limit=candle_limit, params=params
                 )
             else:
@@ -2865,14 +2871,12 @@ class Exchange:
                     limit=candle_limit,
                     since_ms=since_ms,
                 )
+                used_ip = None  # Funding rate doesn't use IP routing yet
 
             # Track REST API weight consumption (candleSnapshot = 20 + items/60)
-            # Track against the pair's assigned IP for monitoring, even though REST
-            # goes through the proxy (can't share exchange instances across event loops)
             if self._exchange_ws and data:
                 weight = 20 + (len(data) // 60)
-                assigned_ip = self._exchange_ws.get_ip_for_pair(pair)
-                ip_label = f"REST({assigned_ip})" if assigned_ip else "REST_PROXY"
+                ip_label = used_ip if used_ip else "REST_PROXY"
                 self._exchange_ws._record_ip_weight(ip_label, weight)
 
             # Some exchanges sort OHLCV in ASC order and others in DESC.
