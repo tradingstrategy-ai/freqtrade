@@ -81,6 +81,8 @@ class ExchangeWS:
 
         # Create dedicated CCXT exchange instances for each IP
         self._ws_exchanges: dict[str, ccxt.Exchange] = {}
+        # Separate REST exchange instances per IP (created lazily in main thread)
+        self._rest_exchanges: dict[str, ccxt.Exchange] = {}
         self._ip_stats: dict[str, dict] = {}
 
         # Diagnostic metrics per IP
@@ -285,6 +287,27 @@ class ExchangeWS:
         if not ip:
             return None
         return self._ws_exchanges.get(ip)
+
+    def get_rest_exchange_for_pair(self, pair: str) -> ccxt.Exchange | None:
+        """Get REST-specific exchange for this pair's IP (separate from WebSocket).
+
+        Creates instances lazily in main thread to bind to main event loop.
+        This avoids "Future attached to different loop" errors that occur when
+        REST and WebSocket share the same CCXT instances.
+        """
+        if not self._ip_pool:
+            return None
+
+        ip = self._pair_ip_assignment.get(pair)
+        if not ip:
+            return None
+
+        # Lazy creation ensures binding to main thread's event loop
+        if ip not in self._rest_exchanges:
+            logger.info(f"[REST-EXCHANGE] Creating REST instance for IP {ip}")
+            self._rest_exchanges[ip] = self._create_single_ws_exchange(ip)
+
+        return self._rest_exchanges.get(ip)
 
     def assign_pair_to_ip(self, pair: str) -> str | None:
         """Assign a pair to an IP if not already assigned.

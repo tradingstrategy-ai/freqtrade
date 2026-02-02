@@ -2851,10 +2851,11 @@ class Exchange:
                 params.update({"price": candle_type.value})
             if candle_type != CandleType.FUNDING_RATE:
                 # Use IP-bound exchange for REST if available (same IP as WebSocket)
+                # NOTE: Uses separate REST exchange instances to avoid event loop conflicts
                 api = self._api_async
                 used_ip = None
                 if self._exchange_ws:
-                    ip_exchange = self._exchange_ws.get_exchange_for_pair(pair)
+                    ip_exchange = self._exchange_ws.get_rest_exchange_for_pair(pair)
                     if ip_exchange:
                         api = ip_exchange
                         used_ip = self._exchange_ws.get_ip_for_pair(pair)
