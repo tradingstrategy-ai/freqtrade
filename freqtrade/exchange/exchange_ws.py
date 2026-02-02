@@ -88,13 +88,20 @@ class ExchangeWS:
 
         # Wallet address for rate limit queries (Hyperliquid-specific)
         # Try multiple sources: config, then ccxt object
+        # DEBUG: Log what keys are in exchange_config
+        logger.info(f"[IP-POOL] DEBUG exchange_config keys: {list(exchange_config.keys())}")
         self._wallet_address: str = exchange_config.get('walletAddress', '')
         logger.info(f"[IP-POOL] Wallet address from config: {'found' if self._wallet_address else 'not found'}")
 
-        if not self._wallet_address and hasattr(ccxt_object, 'walletAddress'):
-            self._wallet_address = ccxt_object.walletAddress or ''
-            if self._wallet_address:
-                logger.info("[IP-POOL] Wallet address found from ccxt_object.walletAddress")
+        if not self._wallet_address:
+            # DEBUG: Check ccxt_object for wallet-related attributes
+            wallet_attrs = [attr for attr in dir(ccxt_object) if 'wallet' in attr.lower() or 'address' in attr.lower()]
+            logger.info(f"[IP-POOL] DEBUG ccxt_object wallet-related attrs: {wallet_attrs}")
+            if hasattr(ccxt_object, 'walletAddress'):
+                logger.info(f"[IP-POOL] DEBUG ccxt_object.walletAddress = {ccxt_object.walletAddress}")
+                self._wallet_address = ccxt_object.walletAddress or ''
+                if self._wallet_address:
+                    logger.info("[IP-POOL] Wallet address found from ccxt_object.walletAddress")
 
         # Log wallet address status at startup for debugging
         if self._wallet_address:
