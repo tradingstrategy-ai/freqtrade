@@ -80,9 +80,14 @@ class ExchangeWS:
         self._ip_metrics: dict[str, dict] = {}
 
         # Wallet address for rate limit queries (Hyperliquid-specific)
+        # Try multiple sources: config, then ccxt object
         self._wallet_address: str = exchange_config.get('walletAddress', '')
+        logger.info(f"[IP-POOL] Wallet address from config: {'found' if self._wallet_address else 'not found'}")
+
         if not self._wallet_address and hasattr(ccxt_object, 'walletAddress'):
             self._wallet_address = ccxt_object.walletAddress or ''
+            if self._wallet_address:
+                logger.info("[IP-POOL] Wallet address found from ccxt_object.walletAddress")
 
         # Log wallet address status at startup for debugging
         if self._wallet_address:
