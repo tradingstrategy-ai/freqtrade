@@ -84,6 +84,12 @@ class ExchangeWS:
         if not self._wallet_address and hasattr(ccxt_object, 'walletAddress'):
             self._wallet_address = ccxt_object.walletAddress or ''
 
+        # Log wallet address status at startup for debugging
+        if self._wallet_address:
+            logger.info(f"[IP-POOL] Wallet address configured for rate limit monitoring: {self._wallet_address[:10]}...{self._wallet_address[-6:]}")
+        else:
+            logger.warning("[IP-POOL] No wallet address found - rate limit monitoring will be disabled. Check 'walletAddress' in exchange config.")
+
         if self._ip_pool:
             self._ws_exchanges = self._create_ws_exchange_pool(ccxt_object)
             # Initialize states: ALL IPs are active (pair distribution mode)
@@ -458,7 +464,7 @@ class ExchangeWS:
             return
 
         if not self._wallet_address:
-            logger.debug("[RATE-LIMIT] No wallet address configured, skipping rate limit check")
+            logger.warning("[RATE-LIMIT] No wallet address configured, skipping rate limit check")
             return
 
         async def check_single_ip(ip: str) -> None:
