@@ -229,16 +229,19 @@ class ExchangeWS:
 
         return self._ws_exchanges[assigned_ip], assigned_ip
 
+    def _count_pairs_per_ip(self) -> dict[str, int]:
+        """Count pairs assigned to each IP."""
+        counts: dict[str, int] = {ip: 0 for ip in self._ip_pool}
+        for pair, ip in self._pair_ip_assignment.items():
+            if ip in counts:
+                counts[ip] += 1
+        return counts
+
     def _log_ip_stats(self) -> None:
         """Log current IP pool statistics with pair distribution info."""
         if not self._ip_pool:
             return
-        # Count pairs per IP
-        pairs_per_ip: dict[str, int] = {ip: 0 for ip in self._ip_pool}
-        for pair, ip in self._pair_ip_assignment.items():
-            if ip in pairs_per_ip:
-                pairs_per_ip[ip] += 1
-
+        pairs_per_ip = self._count_pairs_per_ip()
         stats_str = " | ".join(
             f"{ip}: pairs={pairs_per_ip.get(ip, 0)}, streams={s['active']}, failures={s['failures']}"
             for ip, s in self._ip_stats.items()
@@ -250,12 +253,7 @@ class ExchangeWS:
         if not self._ip_pool:
             return
         states = {ip: self._ip_states.get(ip, IPState.ACTIVE).value for ip in self._ip_pool}
-
-        # Count pairs per IP
-        pairs_per_ip: dict[str, int] = {ip: 0 for ip in self._ip_pool}
-        for pair, ip in self._pair_ip_assignment.items():
-            if ip in pairs_per_ip:
-                pairs_per_ip[ip] += 1
+        pairs_per_ip = self._count_pairs_per_ip()
 
         total_pairs = len(self._pair_ip_assignment)
         logger.info(
@@ -360,27 +358,6 @@ class ExchangeWS:
                 f"last_candle={last_candle_str} "
                 f"recent_errors={len(m.get('errors', []))}"
             )
-
-    def _log_candle_close_state(self, current_minute: int, current_second: int) -> None:
-        """Log state at exact candle close moment (:00:00 - :00:10)."""
-        if not self._ip_pool:
-            return
-        logger.info(f"[CANDLE-CLOSE] At :{current_minute:02d}:{current_second:02d}")
-        for ip in self._ip_pool:
-            ws_ex = self._ws_exchanges.get(ip)
-            if ws_ex:
-                # Sample first 3 pairs
-                sample_pairs = list(self._klines_watching)[:3]
-                for pair, tf, _ in sample_pairs:
-                    data = ws_ex.ohlcvs.get(pair, {}).get(tf, [])
-                    last_ts = data[-1][0] if data else 0
-                    last_str = datetime.fromtimestamp(last_ts / 1000).strftime('%H:%M:%S') if last_ts else 'none'
-                    age_sec = (time.time() * 1000 - last_ts) / 1000 if last_ts else -1
-                    logger.info(
-                        f"[CANDLE-CLOSE] IP={ip} state={self._ip_states.get(ip, 'unknown').value if self._ip_states.get(ip) else 'unknown'} "
-                        f"{pair}/{tf} candles={len(data)} "
-                        f"last={last_str} age={age_sec:.1f}s"
-                    )
 
     def _start_forever(self) -> None:
         self._loop = asyncio.new_event_loop()
@@ -507,31 +484,31 @@ class ExchangeWS:
             )
 
     def _log_candle_boundary_status(self, current_minute: int) -> None:
-        """Log detailed status near candle boundaries for debugging."""
+        """Log detailed status near candle boundaries for debugging (debug level)."""
         if not self._ip_pool:
             return
 
         current_time = time.time()
         now_str = datetime.now().strftime('%H:%M:%S.%f')[:-3]
 
-        logger.info(f"[CANDLE-BOUNDARY] ========== Status at :{current_minute:02d} ({now_str}) ==========")
+        logger.debug(f"[CANDLE-BOUNDARY] ========== Status at :{current_minute:02d} ({now_str}) ==========")
 
         for ip in self._ip_pool:
             ws_ex = self._ws_exchanges.get(ip)
             if not ws_ex:
                 continue
 
-            # Sample first 5 pairs on this IP
-            pairs_on_ip = [p for p, assigned_ip in self._pair_ip_assignment.items() if assigned_ip == ip][:5]
+            # Sample first 3 pairs on this IP (reduced from 5)
+            pairs_on_ip = [p for p, assigned_ip in self._pair_ip_assignment.items() if assigned_ip == ip][:3]
 
             for pair in pairs_on_ip:
-                for tf in ['1h', '4h']:  # Common timeframes
+                for tf in ['1h', '4h']:
                     data = ws_ex.ohlcvs.get(pair, {}).get(tf, [])
                     if data:
                         last_ts = data[-1][0]
                         last_time_str = datetime.fromtimestamp(last_ts / 1000).strftime('%H:%M:%S')
                         age_sec = (current_time * 1000 - last_ts) / 1000
-                        logger.info(
+                        logger.debug(
                             f"[CANDLE-BOUNDARY] IP={ip} {pair}/{tf} "
                             f"candles={len(data)} last={last_time_str} age={age_sec:.1f}s"
                         )
@@ -958,14 +935,6 @@ class ExchangeWS:
         """Return list of active IPs in the pool."""
         return [ip for ip in self._ip_pool if self._ip_states.get(ip) == IPState.ACTIVE]
 
-    def _is_data_fresh(self, data: list) -> bool:
-        """Check if data is fresh enough to use."""
-        if not data:
-            return False
-        last_ts = data[-1][0]  # Timestamp in ms
-        current_ts = time.time() * 1000
-        return (current_ts - last_ts) < self._data_freshness_threshold_ms
-
     @retrier(retries=3)
     def ohlcvs(self, pair: str, timeframe: str) -> list[list]:
         """
@@ -983,22 +952,11 @@ class ExchangeWS:
             data = ws_exchange.ohlcvs.get(pair, {}).get(timeframe, [])
 
             if data:
-                last_ts = data[-1][0]
-                age_sec = (current_time * 1000 - last_ts) / 1000
-                last_time_str = datetime.fromtimestamp(last_ts / 1000).strftime('%H:%M:%S')
-
-                # Always log near candle boundaries, debug otherwise
-                if near_boundary:
-                    logger.info(
-                        f"[OHLCV-READ] :{current_minute:02d} {pair}/{timeframe} "
-                        f"IP={assigned_ip} candles={len(data)} "
-                        f"last={last_time_str} age={age_sec:.1f}s"
-                    )
-                else:
-                    logger.debug(
-                        f"[OHLCV-READ] {pair}/{timeframe} from IP {assigned_ip}, "
-                        f"candles={len(data)} age={age_sec:.1f}s"
-                    )
+                # Debug-level logging only - reduces log volume significantly
+                logger.debug(
+                    f"[OHLCV-READ] {pair}/{timeframe} from IP {assigned_ip}, "
+                    f"candles={len(data)}"
+                )
                 return deepcopy(data)
 
             # No data from assigned IP - this shouldn't happen normally
