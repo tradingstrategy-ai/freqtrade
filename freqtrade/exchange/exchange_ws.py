@@ -11,7 +11,7 @@ from threading import Thread
 import aiohttp
 import ccxt
 
-from freqtrade.constants import Config, PairWithTimeframe
+from freqtrade.constants import Config, ExchangeConfig, PairWithTimeframe
 from freqtrade.enums.candletype import CandleType
 from freqtrade.exceptions import TemporaryError
 from freqtrade.exchange.common import retrier
@@ -30,7 +30,13 @@ class IPState(Enum):
 
 
 class ExchangeWS:
-    def __init__(self, config: Config, ccxt_object: ccxt.Exchange) -> None:
+    def __init__(
+        self,
+        config: Config,
+        ccxt_object: ccxt.Exchange,
+        exchange_config: ExchangeConfig | None = None,
+        wallet_address: str = '',
+    ) -> None:
         self.config = config
         self._ccxt_object = ccxt_object
         self._background_tasks: set[asyncio.Task] = set()
@@ -41,7 +47,8 @@ class ExchangeWS:
         self.klines_last_request: dict[PairWithTimeframe, float] = {}
 
         # IP distribution configuration - pairs distributed across IP pool
-        exchange_config = config.get('exchange', {})
+        # Use explicit exchange_config if provided (preserves credentials), otherwise fallback
+        exchange_config = exchange_config if exchange_config is not None else config.get('exchange', {})
         self._ip_pool: list[str] = exchange_config.get('websocket_ip_pool', [])
 
         # State tracking for IP distribution
@@ -89,23 +96,18 @@ class ExchangeWS:
         self._ip_metrics: dict[str, dict] = {}
 
         # Wallet address for rate limit queries (Hyperliquid-specific)
-        # Try multiple sources: config, then ccxt object
-        # DEBUG: Log what keys are in exchange_config
-        logger.info(f"[IP-POOL] DEBUG exchange_config keys: {list(exchange_config.keys())}")
-        self._wallet_address: str = exchange_config.get('walletAddress', '')
-        logger.info(f"[IP-POOL] Wallet address from config: {'found' if self._wallet_address else 'not found'}")
+        # Use explicitly passed wallet_address (preserved before credential stripping), then fallback
+        self._wallet_address: str = wallet_address or ''
 
+        # Fallback to exchange_config if not passed directly
         if not self._wallet_address:
-            # DEBUG: Check ccxt_object for wallet-related attributes
-            wallet_attrs = [attr for attr in dir(ccxt_object) if 'wallet' in attr.lower() or 'address' in attr.lower()]
-            logger.info(f"[IP-POOL] DEBUG ccxt_object wallet-related attrs: {wallet_attrs}")
-            if hasattr(ccxt_object, 'walletAddress'):
-                logger.info(f"[IP-POOL] DEBUG ccxt_object.walletAddress = {ccxt_object.walletAddress}")
-                self._wallet_address = ccxt_object.walletAddress or ''
-                if self._wallet_address:
-                    logger.info("[IP-POOL] Wallet address found from ccxt_object.walletAddress")
+            self._wallet_address = exchange_config.get('walletAddress', '') or exchange_config.get('wallet_address', '') or ''
 
-        # Log wallet address status at startup for debugging
+        # Fallback to ccxt_object attribute
+        if not self._wallet_address and hasattr(ccxt_object, 'walletAddress'):
+            self._wallet_address = ccxt_object.walletAddress or ''
+
+        # Log wallet address status at startup
         if self._wallet_address:
             logger.info(f"[IP-POOL] Wallet address configured for rate limit monitoring: {self._wallet_address[:10]}...{self._wallet_address[-6:]}")
         else:

@@ -218,6 +218,9 @@ class Exchange:
         self.liquidation_buffer = config.get("liquidation_buffer", 0.05)
 
         exchange_conf: ExchangeConfig = exchange_config if exchange_config else config["exchange"]
+        # Preserve wallet address before credential stripping for ExchangeWS rate limit monitoring
+        # (remove_exchange_credentials strips walletAddress in dry_run mode)
+        _preserved_wallet_address: str = exchange_conf.get('walletAddress', '') or exchange_conf.get('wallet_address', '') or ''
 
         # Deep merge ft_has with default ft_has options
         # Must be called before ft_has is used.
@@ -284,7 +287,11 @@ class Exchange:
             and _has_watch_ohlcv
         ):
             self._ws_async = self._init_ccxt(exchange_conf, False, ccxt_async_config)
-            self._exchange_ws = ExchangeWS(self._config, self._ws_async)
+            self._exchange_ws = ExchangeWS(
+                self._config, self._ws_async,
+                exchange_config=exchange_conf,
+                wallet_address=_preserved_wallet_address,
+            )
 
         logger.info(f'Using Exchange "{self.name}"')
         self.required_candle_call_count = 1
