@@ -139,6 +139,9 @@ class ExchangeWS:
         self._thread.start()
         self.__cleanup_called = False
 
+        # Track last hourly log time
+        self._last_hourly_log: float = 0
+
     def _create_single_ws_exchange(self, ip: str) -> ccxt.Exchange:
         """Create a single CCXT exchange instance bound to a specific IP."""
         template = self._ccxt_object
@@ -187,7 +190,7 @@ class ExchangeWS:
             if self._ip_states.get(assigned_ip) == IPState.ACTIVE:
                 return self._ws_exchanges[assigned_ip], assigned_ip
             # IP failed - need to reassign
-            logger.info(
+            logger.debug(
                 f"[PAIR-REASSIGN] Pair {pair} was on failed IP {assigned_ip}, "
                 f"reassigning to active IP"
             )
@@ -216,8 +219,9 @@ class ExchangeWS:
         # Cache the assignment
         self._pair_ip_assignment[pair] = assigned_ip
 
+        # Log reassignments at INFO (important event), new assignments at DEBUG
         if was_reassigned:
-            logger.info(
+            logger.debug(
                 f"[PAIR-ASSIGN] {pair} reassigned: {old_ip} -> {assigned_ip} "
                 f"(now has {current_count + 1} pairs)"
             )
@@ -238,7 +242,11 @@ class ExchangeWS:
         return counts
 
     def _log_ip_stats(self) -> None:
-        """Log current IP pool statistics with pair distribution info."""
+        """Log current IP pool statistics with pair distribution info.
+
+        Called once per hour with the :20 refresh - provides essential visibility
+        into IP distribution without log noise.
+        """
         if not self._ip_pool:
             return
         pairs_per_ip = self._count_pairs_per_ip()
@@ -246,17 +254,17 @@ class ExchangeWS:
             f"{ip}: pairs={pairs_per_ip.get(ip, 0)}, streams={s['active']}, failures={s['failures']}"
             for ip, s in self._ip_stats.items()
         )
-        logger.info(f"[IP-DISTRIBUTION] {stats_str}")
+        logger.info(f"[IP-STATS] {stats_str}")
 
     def _log_distribution_state(self) -> None:
-        """Log current pair distribution state for debugging."""
+        """Log current pair distribution state for debugging (DEBUG level)."""
         if not self._ip_pool:
             return
         states = {ip: self._ip_states.get(ip, IPState.ACTIVE).value for ip in self._ip_pool}
         pairs_per_ip = self._count_pairs_per_ip()
 
         total_pairs = len(self._pair_ip_assignment)
-        logger.info(
+        logger.debug(
             f"[DISTRIBUTION-STATE] Total pairs: {total_pairs} | "
             f"Per-IP: {pairs_per_ip} | States: {states}"
         )
@@ -304,7 +312,7 @@ class ExchangeWS:
 
         # Lazy creation ensures binding to main thread's event loop
         if ip not in self._rest_exchanges:
-            logger.info(f"[REST-EXCHANGE] Creating REST instance for IP {ip}")
+            logger.debug(f"[REST-EXCHANGE] Creating REST instance for IP {ip}")
             self._rest_exchanges[ip] = self._create_single_ws_exchange(ip)
 
         return self._rest_exchanges.get(ip)
@@ -332,7 +340,7 @@ class ExchangeWS:
     # =====================================================================
 
     def _log_metrics_summary(self) -> None:
-        """Log comprehensive metrics for all IPs - for candle boundary analysis."""
+        """Log comprehensive metrics for all IPs (DEBUG level)."""
         if not self._ip_pool:
             return
         for ip in self._ip_pool:
@@ -351,7 +359,7 @@ class ExchangeWS:
                     m.get('last_candle_ts', 0) / 1000
                 ).strftime('%H:%M:%S')
 
-            logger.info(
+            logger.debug(
                 f"[METRICS] IP={ip} state={self._ip_states.get(ip, 'unknown').value if self._ip_states.get(ip) else 'unknown'} "
                 f"subscriptions={sub_count} "
                 f"candles_received={m.get('candles_received', 0)} "
@@ -365,9 +373,7 @@ class ExchangeWS:
         # Start stats monitor if IP pool is configured
         if self._ip_pool:
             self._loop.create_task(self._stats_monitor())
-            logger.info(
-                f"[PAIR-DISTRIBUTION] Started stats monitor for {len(self._ip_pool)} IPs"
-            )
+            logger.debug(f"[IP-POOL] Started stats monitor for {len(self._ip_pool)} IPs")
 
         try:
             self._loop.run_forever()
@@ -377,16 +383,15 @@ class ExchangeWS:
 
     async def _stats_monitor(self) -> None:
         """
-        Monitor pair distribution stats, log periodically, and handle:
+        Monitor pair distribution and handle:
         - Periodic connection refresh at :20 (40 min before candle boundary)
         - IP recovery after cooldown
-        In pair distribution mode, all IPs are active simultaneously,
-        each handling their assigned subset of pairs.
+        - Hourly stats logging (with refresh)
+
+        Logging is minimal at INFO level - use -vv for detailed DEBUG output.
         """
-        log_counter = 0
         while True:
             await asyncio.sleep(30)  # Check every 30 seconds
-            log_counter += 1
 
             if not self._ip_pool:
                 continue
@@ -402,34 +407,26 @@ class ExchangeWS:
                 # Only refresh if we haven't refreshed in the last 30 minutes
                 if current_time - self._last_periodic_refresh > 1800:
                     await self._refresh_all_connections()
+                    # Log IP stats once per hour with the refresh
+                    self._log_ip_stats()
 
-            # Try to recover failed IPs after 5 minute cooldown
+            # Try to recover failed IPs after cooldown
             await self._try_recover_failed_ips()
 
-            # Log comprehensive stats every minute
-            if log_counter % 2 == 0:  # Every 60 seconds
-                self._log_comprehensive_ip_health()
-
-            # Log distribution state and check rate limits every 5 minutes
-            if log_counter % 10 == 0:  # Every 5 minutes
+            # DEBUG-level logging for detailed diagnostics (visible with -vv)
+            # Log distribution state every 5 minutes
+            if int(current_time) % 300 < 30:  # Every 5 minutes (within 30s window)
                 self._log_distribution_state()
                 self._log_metrics_summary()
-                # Log tracked weight usage per IP
                 self._log_ip_weight_status()
-                # Check rate limits per IP via API (Hyperliquid-specific)
                 await self._check_rate_limits_per_ip()
 
-            # Log detailed stats every 15 minutes
-            if log_counter % 30 == 0:  # Every 15 minutes
-                self._log_ip_stats()
-                self._log_all_pair_assignments()
-
-            # Extra logging near candle boundaries (minute 58-02)
+            # Extra DEBUG logging near candle boundaries (minute 58-02)
             if current_minute >= 58 or current_minute <= 2:
                 self._log_candle_boundary_status(current_minute)
 
     def _log_comprehensive_ip_health(self) -> None:
-        """Log comprehensive health status for all IPs."""
+        """Log comprehensive health status for all IPs (DEBUG level)."""
         if not self._ip_pool:
             return
 
@@ -440,7 +437,6 @@ class ExchangeWS:
             ws_ex = self._ws_exchanges.get(ip)
             state = self._ip_states.get(ip, IPState.ACTIVE)
             stats = self._ip_stats.get(ip, {})
-            metrics = self._ip_metrics.get(ip, {})
 
             # Count pairs assigned to this IP
             pairs_on_ip = [p for p, assigned_ip in self._pair_ip_assignment.items() if assigned_ip == ip]
@@ -463,8 +459,6 @@ class ExchangeWS:
             avg_age = sum(f[2] for f in freshness_1h) / len(freshness_1h) if freshness_1h else -1
 
             # Count stale streams - threshold depends on timeframe
-            # 1h candles: stale if >65 min old (allowing 5 min buffer after hour)
-            # 4h candles: stale if >245 min old (allowing 5 min buffer after 4h)
             def is_stale(pair: str, tf: str, age_sec: float) -> bool:
                 if tf == '4h':
                     return age_sec > 14700  # 4h + 5min = 245 min
@@ -476,7 +470,7 @@ class ExchangeWS:
             # Connection uptime
             uptime_sec = current_time - self._ip_connection_start.get(ip, current_time)
 
-            logger.info(
+            logger.debug(
                 f"[IP-HEALTH] {now_str} IP={ip} state={state.value} "
                 f"pairs_assigned={num_pairs} streams={sub_count} "
                 f"avg_data_age={avg_age:.1f}s stale_streams={stale_count} "
@@ -514,7 +508,7 @@ class ExchangeWS:
                         )
 
     def _log_all_pair_assignments(self) -> None:
-        """Log all pair-to-IP assignments for debugging."""
+        """Log all pair-to-IP assignments for debugging (DEBUG level)."""
         if not self._ip_pool:
             return
 
@@ -524,10 +518,10 @@ class ExchangeWS:
             if ip in pairs_by_ip:
                 pairs_by_ip[ip].append(pair)
 
-        logger.info(f"[PAIR-DISTRIBUTION] Total pairs assigned: {len(self._pair_ip_assignment)}")
+        logger.debug(f"[PAIR-DISTRIBUTION] Total pairs assigned: {len(self._pair_ip_assignment)}")
         for ip in self._ip_pool:
             pairs = pairs_by_ip.get(ip, [])
-            logger.info(
+            logger.debug(
                 f"[PAIR-DISTRIBUTION] IP={ip} has {len(pairs)} pairs: "
                 f"{', '.join(sorted(pairs)[:10])}{'...' if len(pairs) > 10 else ''}"
             )
@@ -600,11 +594,14 @@ class ExchangeWS:
         return 20
 
     def _log_ip_weight_status(self) -> None:
-        """Log current rate limit weight usage for all IPs and REST proxy."""
+        """Log current rate limit weight usage for all IPs and REST proxy (DEBUG level).
+
+        Warnings for high usage (>70%) remain at WARNING level.
+        """
         # Log REST proxy consumption (all REST calls go through single proxy)
         rest_usage, rest_pct = self._get_ip_weight_usage("REST_PROXY")
         if rest_usage > 0:
-            logger.info(f"[REST-WEIGHT] REST_PROXY={rest_usage}/{self._ip_weight_budget}({rest_pct:.0f}%)")
+            logger.debug(f"[REST-WEIGHT] REST_PROXY={rest_usage}/{self._ip_weight_budget}({rest_pct:.0f}%)")
             if rest_pct > 70:
                 logger.warning(f"[REST-WEIGHT-HIGH] REST proxy at {rest_pct:.0f}% of rate limit budget")
 
@@ -619,7 +616,7 @@ class ExchangeWS:
             if pct > 70:
                 logger.warning(f"[IP-WEIGHT-HIGH] IP={ip} at {pct:.0f}% of rate limit budget")
 
-        logger.info(f"[IP-WEIGHT] {' | '.join(weight_status)}")
+        logger.debug(f"[IP-WEIGHT] {' | '.join(weight_status)}")
 
     async def _check_rate_limits_per_ip(self) -> None:
         """
@@ -677,13 +674,13 @@ class ExchangeWS:
                                     'checked_at': datetime.now().strftime('%H:%M:%S')
                                 }
 
-                            logger.info(
+                            logger.debug(
                                 f"[RATE-LIMIT] IP={ip} "
                                 f"used={n_requests_used}/{n_requests_cap} "
                                 f"({usage_pct:.1f}%) surplus={n_requests_surplus}"
                             )
 
-                            # Warn if approaching limit
+                            # Warn if approaching limit (keep at WARNING)
                             if usage_pct > 80:
                                 logger.warning(
                                     f"[RATE-LIMIT] IP={ip} approaching limit ({usage_pct:.1f}%)"
@@ -701,7 +698,7 @@ class ExchangeWS:
         # Get active IPs and run all checks in parallel
         active_ips = [ip for ip in self._ip_pool if self._ip_states.get(ip) == IPState.ACTIVE]
         if active_ips:
-            logger.info(f"[RATE-LIMIT] Checking rate limits for {len(active_ips)} IPs in parallel...")
+            logger.debug(f"[RATE-LIMIT] Checking rate limits for {len(active_ips)} IPs...")
             await asyncio.gather(*[check_single_ip(ip) for ip in active_ips], return_exceptions=True)
 
     async def _refresh_all_connections(self) -> None:
@@ -753,13 +750,13 @@ class ExchangeWS:
         # This ensures WS subscriptions are re-established immediately after refresh
         watched_pairs = list(self._klines_watching)
         if watched_pairs:
-            logger.info(
+            logger.debug(
                 f"[WS-REFRESH] Re-scheduling {len(watched_pairs)} watched pairs after refresh"
             )
             # Trigger scheduling for all watched pairs (already in async context)
             await self._schedule_while_true()
 
-        logger.info(f"[WS-REFRESH] Completed - all {len(self._ip_pool)} IPs refreshed and reset to ACTIVE")
+        logger.info(f"[WS-REFRESH] Completed - {len(self._ip_pool)} IPs refreshed")
 
     async def _try_recover_failed_ips(self) -> None:
         """
@@ -778,7 +775,7 @@ class ExchangeWS:
                 time_since_failure = current_time - failure_time
 
                 if time_since_failure > self._recovery_cooldown:
-                    logger.info(
+                    logger.debug(
                         f"[IP-RECOVERY] Attempting to recover IP {ip} "
                         f"(failed {time_since_failure:.0f}s ago)"
                     )
@@ -798,7 +795,7 @@ class ExchangeWS:
                         self._ip_session_times[ip] = current_time
                         self._ip_failure_time.pop(ip, None)
 
-                        logger.info(f"[IP-RECOVERY] IP {ip} recovered and set to ACTIVE")
+                        logger.info(f"[IP-RECOVERY] IP {ip} recovered")
 
                         # Re-schedule pairs that need an IP assignment
                         # After IP failure, pair assignments are cleared, so look for
@@ -813,7 +810,7 @@ class ExchangeWS:
                                 # Allow re-scheduling by removing from scheduled set
                                 self._klines_scheduled.discard(p)
 
-                            logger.info(
+                            logger.debug(
                                 f"[IP-RECOVERY] Re-scheduling {len(pairs_to_reschedule)} pairs "
                                 f"after IP {ip} recovery"
                             )
@@ -864,9 +861,10 @@ class ExchangeWS:
         for p in pairs_to_reassign:
             del self._pair_ip_assignment[p]
 
+        active_remaining = len([ip for ip in self._ip_pool if self._ip_states.get(ip) == IPState.ACTIVE])
         logger.info(
-            f"[IP-FAILURE] Cleared {len(pairs_to_reassign)} pair assignments from {failed_ip}. "
-            f"Active IPs remaining: {[ip for ip in self._ip_pool if self._ip_states.get(ip) == IPState.ACTIVE]}"
+            f"[IP-FAILURE] Cleared {len(pairs_to_reassign)} pairs from {failed_ip}, "
+            f"{active_remaining} IPs remaining active"
         )
 
     def cleanup(self) -> None:
@@ -1009,7 +1007,7 @@ class ExchangeWS:
                 if assigned_ip in self._ip_stats:
                     self._ip_stats[assigned_ip]['active'] += 1
 
-                logger.info(
+                logger.debug(
                     f"[WS-SCHEDULE] {pair}/{timeframe} -> IP {assigned_ip} "
                     f"(active on IP: {self._ip_stats.get(assigned_ip, {}).get('active', '?')})"
                 )
@@ -1055,7 +1053,7 @@ class ExchangeWS:
             if (result1 := task.result()) is not None:
                 result = str(result1)
 
-        logger.info(
+        logger.debug(
             f"[WS-TASK-DONE] {pair}/{timeframe} on IP {assigned_ip} - result: {result} "
             f"(remaining active on IP: {self._ip_stats.get(assigned_ip, {}).get('active', '?')})"
         )
@@ -1077,14 +1075,14 @@ class ExchangeWS:
         # Apply exponential backoff if there's a pending delay for this IP
         backoff = self._ip_backoff_delay.get(assigned_ip, 0)
         if backoff > 0:
-            logger.info(
+            logger.debug(
                 f"[WS-BACKOFF] Applying {backoff:.1f}s backoff delay for IP {assigned_ip} "
                 f"before connecting {pair}/{timeframe}"
             )
             await asyncio.sleep(backoff)
 
         try:
-            logger.info(
+            logger.debug(
                 f"[WS-CONNECT-START] Opening WebSocket for {pair}/{timeframe} on IP {assigned_ip} "
                 f"at {datetime.now().strftime('%H:%M:%S')}"
             )
@@ -1105,7 +1103,7 @@ class ExchangeWS:
 
                     # Calculate and log Time-to-First-Message (TTFM)
                     ttfm = time.time() - connect_start
-                    logger.info(
+                    logger.debug(
                         f"[WS-TTFM] {pair}/{timeframe} IP={assigned_ip} time_to_first_message={ttfm:.2f}s"
                     )
 
@@ -1115,7 +1113,7 @@ class ExchangeWS:
 
                     # Reset backoff on successful connection
                     if assigned_ip in self._ip_backoff_delay and self._ip_backoff_delay[assigned_ip] > 0:
-                        logger.info(f"[WS-BACKOFF] IP={assigned_ip} backoff reset after successful connection")
+                        logger.debug(f"[WS-BACKOFF] IP={assigned_ip} backoff reset after successful connection")
                         self._ip_backoff_delay[assigned_ip] = 0
 
                     # Reset consecutive failures on success
@@ -1124,7 +1122,7 @@ class ExchangeWS:
 
                     last_ts = data[-1][0] if data else 0
                     last_time_str = datetime.fromtimestamp(last_ts / 1000).strftime('%H:%M:%S') if last_ts else 'N/A'
-                    logger.info(
+                    logger.debug(
                         f"[WS-CONNECTED] First data for {pair}/{timeframe} on IP {assigned_ip} "
                         f"candles={len(data)} last_candle={last_time_str}"
                     )
@@ -1137,7 +1135,7 @@ class ExchangeWS:
                     last_ts = data[-1][0]
                     last_time_str = datetime.fromtimestamp(last_ts / 1000).strftime('%H:%M:%S')
                     age_sec = (time.time() * 1000 - last_ts) / 1000
-                    logger.info(
+                    logger.debug(
                         f"[WS-UPDATE] :{current_minute:02d} {pair}/{timeframe} IP={assigned_ip} "
                         f"candles={len(data)} last={last_time_str} age={age_sec:.1f}s msg#={message_count}"
                     )
@@ -1147,7 +1145,7 @@ class ExchangeWS:
                     f"in {(dt_ts() - start) / 1000:.3f}s"
                 )
         except ccxt.ExchangeClosedByUser:
-            logger.info(f"[WS-CLOSED] Exchange closed by user for {pair}/{timeframe} on IP {assigned_ip}")
+            logger.debug(f"[WS-CLOSED] Exchange closed by user for {pair}/{timeframe} on IP {assigned_ip}")
         except ccxt.BaseError as e:
             # DIAGNOSTIC: Log connection errors with full context
             error_time = datetime.now().strftime('%H:%M:%S.%f')
@@ -1171,7 +1169,7 @@ class ExchangeWS:
                 f"at={error_time}"
             )
 
-            logger.warning(
+            logger.debug(
                 f"[WS-BACKOFF] IP={assigned_ip} backoff_delay={new_backoff:.1f}s after {failure_count} failures"
             )
 
@@ -1185,14 +1183,11 @@ class ExchangeWS:
                 })
                 self._ip_metrics[assigned_ip]['errors'] = self._ip_metrics[assigned_ip]['errors'][-10:]
 
-            # Log IP stats after failure
-            self._log_ip_stats()
-
             # Handle IP failure - mark IP as failed and allow pair redistribution
             if self._ip_pool:
                 asyncio.create_task(self._handle_ip_failure(assigned_ip, pair))
         finally:
-            logger.info(
+            logger.debug(
                 f"[WS-STOPPED] Watch ended for {pair}/{timeframe} on IP {assigned_ip} "
                 f"(received_data: {first_message_received})"
             )
