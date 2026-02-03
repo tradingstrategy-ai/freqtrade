@@ -218,6 +218,9 @@ class Exchange:
         self.liquidation_buffer = config.get("liquidation_buffer", 0.05)
 
         exchange_conf: ExchangeConfig = exchange_config if exchange_config else config["exchange"]
+        # Preserve wallet address before credential stripping for ExchangeWS rate limit monitoring
+        # (remove_exchange_credentials strips walletAddress in dry_run mode)
+        _preserved_wallet_address: str = exchange_conf.get('walletAddress', '') or exchange_conf.get('wallet_address', '') or ''
 
         # Deep merge ft_has with default ft_has options
         # Must be called before ft_has is used.
@@ -284,7 +287,11 @@ class Exchange:
             and _has_watch_ohlcv
         ):
             self._ws_async = self._init_ccxt(exchange_conf, False, ccxt_async_config)
-            self._exchange_ws = ExchangeWS(self._config, self._ws_async)
+            self._exchange_ws = ExchangeWS(
+                self._config, self._ws_async,
+                exchange_config=exchange_conf,
+                wallet_address=_preserved_wallet_address,
+            )
 
         logger.info(f'Using Exchange "{self.name}"')
         self.required_candle_call_count = 1
@@ -2509,41 +2516,61 @@ class Exchange:
             self._ohlcv_partial_candle if candle_type != CandleType.FUNDING_RATE else False,
         )
 
-    def _try_build_from_websocket(
-        self, pair: str, timeframe: str, candle_type: CandleType
-    ) -> Coroutine[Any, Any, OHLCVResponse] | None:
+    async def _async_fetch_ohlcv_with_ws_retry(
+        self,
+        pair: str,
+        timeframe: str,
+        candle_type: CandleType,
+        since_ms: int | None,
+        max_ws_retries: int = 10,
+    ) -> OHLCVResponse:
         """
-        Try to build a coroutine to get data from websocket.
+        Fetch OHLCV data with WS-first strategy and parallel-safe async retries.
+        Tries WebSocket up to max_ws_retries times before falling back to REST.
+        All pairs can retry simultaneously (non-blocking async delays).
         """
-        if self._can_use_websocket(self._exchange_ws, pair, timeframe, candle_type):
-            candle_ts = dt_ts(timeframe_to_prev_date(timeframe))
-            prev_candle_ts = dt_ts(date_minus_candles(timeframe, 1))
+        candle_ts = dt_ts(timeframe_to_prev_date(timeframe))
+        prev_candle_ts = dt_ts(date_minus_candles(timeframe, 1))
+        half_candle = int(candle_ts - (candle_ts - prev_candle_ts) * 0.5)
+
+        # Retry delays: 1, 1, 2, 2, 3, 3, 4, 4, 5, 5 = 30s total max
+        retry_delays = [1, 1, 2, 2, 3, 3, 4, 4, 5, 5]
+
+        for attempt in range(max_ws_retries):
+            # Check if WS has fresh data
             candles = self._exchange_ws.ohlcvs(pair, timeframe)
-            half_candle = int(candle_ts - (candle_ts - prev_candle_ts) * 0.5)
-            last_refresh_time = int(
-                self._exchange_ws.klines_last_refresh.get((pair, timeframe, candle_type), 0)
+            last_refresh = self._exchange_ws.klines_last_refresh.get(
+                (pair, timeframe, candle_type), 0
             )
 
-            if (
-                candles
-                and (
-                    (len(candles) > 1 and candles[-1][0] >= prev_candle_ts)
-                    # Edgecase on reconnect, where 1 candle is available but it's the current one
-                    or (len(candles) == 1 and candles[-1][0] < candle_ts)
+            condition1 = len(candles) > 1 and candles[-1][0] >= prev_candle_ts
+            condition2 = len(candles) == 1 and candles[-1][0] < candle_ts
+            refresh_ok = last_refresh >= half_candle
+
+            if candles and (condition1 or condition2) and refresh_ok:
+                # WS data is valid!
+                if attempt > 0:
+                    logger.info(
+                        f"[WS-SUCCESS] {pair}/{timeframe} got data on attempt {attempt + 1}"
+                    )
+                return await self._exchange_ws.get_ohlcv(
+                    pair, timeframe, candle_type, candle_ts
                 )
-                and last_refresh_time >= half_candle
-            ):
-                # Usable result, candle contains the previous candle.
-                # Also, we check if the last refresh time is no more than half the candle ago.
-                logger.debug(f"reuse watch result for {pair}, {timeframe}, {last_refresh_time}")
 
-                return self._exchange_ws.get_ohlcv(pair, timeframe, candle_type, candle_ts)
-            logger.info(
-                f"Couldn't reuse watch for {pair}, {timeframe}, falling back to REST api. "
-                f"{candle_ts < last_refresh_time}, {candle_ts}, {last_refresh_time}, "
-                f"{format_ms_time(candle_ts)}, {format_ms_time(last_refresh_time)} "
-            )
-        return None
+            # Not ready yet - wait and retry (non-blocking)
+            if attempt < max_ws_retries - 1:
+                delay = retry_delays[attempt]
+                logger.debug(
+                    f"[WS-WAIT] {pair}/{timeframe} attempt {attempt + 1}/{max_ws_retries}, "
+                    f"waiting {delay}s"
+                )
+                await asyncio.sleep(delay)
+
+        # All WS retries exhausted - fall back to REST
+        logger.info(
+            f"[REST-FALLBACK] {pair}/{timeframe} after {max_ws_retries} WS attempts"
+        )
+        return await self._async_get_candle_history(pair, timeframe, candle_type, since_ms)
 
     def _can_use_websocket(
         self, exchange_ws: ExchangeWS | None, pair: str, timeframe: str, candle_type: CandleType
@@ -2565,18 +2592,21 @@ class Exchange:
         cache: bool,
     ) -> Coroutine[Any, Any, OHLCVResponse]:
         not_all_data = cache and self.required_candle_call_count > 1
-        if cache:
-            if self._can_use_websocket(self._exchange_ws, pair, timeframe, candle_type):
-                # Subscribe to websocket
-                self._exchange_ws.schedule_ohlcv(pair, timeframe, candle_type)
+
+        # Subscribe to WebSocket stream if available
+        if cache and self._can_use_websocket(self._exchange_ws, pair, timeframe, candle_type):
+            self._exchange_ws.schedule_ohlcv(pair, timeframe, candle_type)
+
+            # Use async WS retry - handles WS/REST decision inside async execution
+            # All pairs retry in parallel (non-blocking async delays)
+            if (pair, timeframe, candle_type) in self._klines:
+                return self._async_fetch_ohlcv_with_ws_retry(
+                    pair, timeframe, candle_type, since_ms, max_ws_retries=10
+                )
 
         if cache and (pair, timeframe, candle_type) in self._klines:
             candle_limit = self.ohlcv_candle_limit(timeframe, candle_type)
             min_ts = dt_ts(date_minus_candles(timeframe, candle_limit - 5))
-
-            if ws_resp := self._try_build_from_websocket(pair, timeframe, candle_type):
-                # We have a usable websocket response
-                return ws_resp
 
             # Check if 1 call can get us updated candles without hole in the data.
             if min_ts < self._pairs_last_refresh_time.get((pair, timeframe, candle_type), 0):
@@ -2715,6 +2745,13 @@ class Exchange:
         """
         logger.debug("Refreshing candle (OHLCV) data for %d pairs", len(pair_list))
 
+        # Pre-assign pairs to IPs before REST fetch (ensures even distribution from startup)
+        if self._exchange_ws and self._exchange_ws._ip_pool:
+            unique_pairs = {pair for pair, _, _ in pair_list}
+            for pair in unique_pairs:
+                self._exchange_ws.assign_pair_to_ip(pair)
+            logger.debug(f"[REST-IP-ASSIGN] Pre-assigned {len(unique_pairs)} pairs to IPs")
+
         # Gather coroutines to run
         ohlcv_dl_jobs, cached_pairs = self._build_ohlcv_dl_jobs(pair_list, since_ms, cache)
 
@@ -2820,7 +2857,18 @@ class Exchange:
             if candle_type and candle_type not in (CandleType.SPOT, CandleType.FUTURES):
                 params.update({"price": candle_type.value})
             if candle_type != CandleType.FUNDING_RATE:
-                data = await self._api_async.fetch_ohlcv(
+                # Use IP-bound exchange for REST if available (same IP as WebSocket)
+                # NOTE: Uses separate REST exchange instances to avoid event loop conflicts
+                api = self._api_async
+                used_ip = None
+                if self._exchange_ws:
+                    ip_exchange = self._exchange_ws.get_rest_exchange_for_pair(pair)
+                    if ip_exchange:
+                        api = ip_exchange
+                        used_ip = self._exchange_ws.get_ip_for_pair(pair)
+                        logger.debug(f"[REST-FALLBACK] {pair} using IP={used_ip}")
+
+                data = await api.fetch_ohlcv(
                     pair, timeframe=timeframe, since=since_ms, limit=candle_limit, params=params
                 )
             else:
@@ -2831,6 +2879,14 @@ class Exchange:
                     limit=candle_limit,
                     since_ms=since_ms,
                 )
+                used_ip = None  # Funding rate doesn't use IP routing yet
+
+            # Track REST API weight consumption (candleSnapshot = 20 + items/60)
+            if self._exchange_ws and data:
+                weight = 20 + (len(data) // 60)
+                ip_label = used_ip if used_ip else "REST_PROXY"
+                self._exchange_ws._record_ip_weight(ip_label, weight)
+
             # Some exchanges sort OHLCV in ASC order and others in DESC.
             # Only sort if necessary to save computing time
             try:
