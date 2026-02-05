@@ -11,6 +11,7 @@ from freqtrade.exceptions import OperationalException
 from freqtrade.loggers.buffering_handler import FTBufferingHandler
 from freqtrade.loggers.ft_rich_handler import FtRichHandler
 from freqtrade.loggers.rich_console import get_rich_console
+from freqtrade.loggers.sensitive_filter import SensitiveDataFilter
 
 
 # from freqtrade.loggers.std_err_stream_handler import FTStdErrStreamHandler
@@ -213,6 +214,11 @@ def setup_logging(config: Config) -> None:
         )
 
         logging.config.dictConfig(log_config)
+
+        # Add sensitive data filter to all handlers
+        sensitive_filter = SensitiveDataFilter()
+        for handler in logging.root.handlers:
+            handler.addFilter(sensitive_filter)
 
     # Add buffer handler to root logger
     if bufferHandler not in logging.root.handlers:

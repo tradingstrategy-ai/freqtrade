@@ -11,6 +11,7 @@ from freqtrade.loggers import (
     setup_logging,
     setup_logging_pre,
 )
+from freqtrade.loggers.sensitive_filter import SensitiveDataFilter
 from freqtrade.loggers.set_log_levels import (
     reduce_verbosity_for_bias_tester,
     restore_verbosity_for_bias_tester,
@@ -246,3 +247,137 @@ def test_reduce_verbosity():
     assert logging.getLogger("freqtrade.strategy.hyper").getEffectiveLevel() == prior_level
     assert logging.getLogger("freqtrade").getEffectiveLevel() == prior_level
     # base level wasn't changed
+
+
+class TestSensitiveDataFilter:
+    """Tests for the SensitiveDataFilter logging filter."""
+
+    def test_redacts_private_key_double_quotes(self):
+        f = SensitiveDataFilter()
+        text = '{"privateKey": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"}'
+        result = f._sanitize(text)
+        assert "[REDACTED]" in result
+        assert "1234567890abcdef" not in result
+
+    def test_redacts_private_key_single_quotes(self):
+        f = SensitiveDataFilter()
+        text = "{'privateKey': '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef'}"
+        result = f._sanitize(text)
+        assert "[REDACTED]" in result
+        assert "1234567890abcdef" not in result
+
+    def test_redacts_private_key_snake_case(self):
+        f = SensitiveDataFilter()
+        text = '{"private_key": "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"}'
+        result = f._sanitize(text)
+        assert "[REDACTED]" in result
+        assert "abcdef1234567890" not in result
+
+    def test_redacts_signature(self):
+        f = SensitiveDataFilter()
+        text = '{"signature": "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"}'
+        result = f._sanitize(text)
+        assert "[REDACTED]" in result
+        assert "abcdef1234567890" not in result
+
+    def test_redacts_api_key(self):
+        f = SensitiveDataFilter()
+        text = '{"apiKey": "my-super-secret-api-key-12345"}'
+        result = f._sanitize(text)
+        assert "[REDACTED]" in result
+        assert "my-super-secret-api-key-12345" not in result
+
+    def test_redacts_secret(self):
+        f = SensitiveDataFilter()
+        text = '{"secret": "very-long-secret-value-here"}'
+        result = f._sanitize(text)
+        assert "[REDACTED]" in result
+        assert "very-long-secret-value-here" not in result
+
+    def test_preserves_normal_content(self):
+        f = SensitiveDataFilter()
+        text = '{"type": "order", "price": 100.5, "amount": 1.0}'
+        result = f._sanitize(text)
+        assert result == text  # Unchanged
+
+    def test_preserves_short_values(self):
+        f = SensitiveDataFilter()
+        # Values shorter than thresholds should not be redacted
+        text = '{"apiKey": "short"}'
+        result = f._sanitize(text)
+        assert result == text  # Unchanged (less than 16 chars)
+
+    def test_filter_method_sanitizes_message(self):
+        f = SensitiveDataFilter()
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="",
+            lineno=0,
+            msg='Request: {"privateKey": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"}',
+            args=(),
+            exc_info=None,
+        )
+        result = f.filter(record)
+        assert result is True  # Record should always be kept
+        assert "[REDACTED]" in record.msg
+        assert "1234567890abcdef" not in record.msg
+
+    def test_filter_method_sanitizes_args(self):
+        f = SensitiveDataFilter()
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="",
+            lineno=0,
+            msg="Data: %s",
+            args=('{"privateKey": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"}',),
+            exc_info=None,
+        )
+        result = f.filter(record)
+        assert result is True
+        assert "[REDACTED]" in record.args[0]
+        assert "1234567890abcdef" not in record.args[0]
+
+    def test_case_insensitive(self):
+        f = SensitiveDataFilter()
+        # Test case insensitivity for key names
+        text = '{"PRIVATEKEY": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"}'
+        result = f._sanitize(text)
+        assert "[REDACTED]" in result
+        assert "1234567890abcdef" not in result
+
+    def test_filter_method_with_dict_args(self):
+        """Test that dict-style args (for %(name)s formatting) are handled correctly."""
+        f = SensitiveDataFilter()
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="",
+            lineno=0,
+            msg="Config: %(config)s",
+            args={"config": '{"privateKey": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"}'},
+            exc_info=None,
+        )
+        result = f.filter(record)
+        assert result is True
+        assert isinstance(record.args, dict)
+        assert "[REDACTED]" in record.args["config"]
+
+    def test_filter_preserves_non_string_args(self):
+        """Test that non-string args in tuples are preserved."""
+        f = SensitiveDataFilter()
+        test_dict = {"options": True, "rateLimit": 500}
+        record = logging.LogRecord(
+            name="test",
+            level=logging.INFO,
+            pathname="",
+            lineno=0,
+            msg="Config: %s",
+            args=(test_dict,),
+            exc_info=None,
+        )
+        result = f.filter(record)
+        assert result is True
+        assert isinstance(record.args, tuple)
+        assert record.args[0] == test_dict  # Dict should be unchanged
