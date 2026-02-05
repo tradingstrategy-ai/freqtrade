@@ -364,8 +364,8 @@ class TestSensitiveDataFilter:
         assert isinstance(record.args, dict)
         assert "[REDACTED]" in record.args["config"]
 
-    def test_filter_preserves_non_string_args(self):
-        """Test that non-string args in tuples are preserved."""
+    def test_filter_preserves_non_sensitive_dict_args(self):
+        """Test that non-sensitive dict args are converted to string but content preserved."""
         f = SensitiveDataFilter()
         test_dict = {"options": True, "rateLimit": 500}
         record = logging.LogRecord(
@@ -380,4 +380,87 @@ class TestSensitiveDataFilter:
         result = f.filter(record)
         assert result is True
         assert isinstance(record.args, tuple)
-        assert record.args[0] == test_dict  # Dict should be unchanged
+        # Dict is converted to string for sanitization
+        sanitized = record.args[0]
+        assert isinstance(sanitized, str)
+        assert "500" in sanitized
+        assert "True" in sanitized
+
+    def test_redacts_ccxt_config_dict(self):
+        """Test that the ACTUAL log format from exchange.py is redacted."""
+        f = SensitiveDataFilter()
+
+        # This is the EXACT format logged by freqtrade
+        # When logger.info("msg: %s", dict) is called, Python stores dict as args directly
+        ccxt_kwargs = {
+            "options": {"defaultType": "swap"},
+            "enableRateLimit": True,
+            "rateLimit": 500,
+            "apiKey": "ed25519:GjzHM8W8G6QU1BgZjEqymm8csu3jexsbc7HoqHPaar4f",
+            "secret": "ed25519:JC5mjh84GkitnPrzvJLeN8AJ8CGZeKNfrvZmLJ9cBC6w",
+            "accountId": "0xc2f9d39accd5e68e79241c105ffaabe52f662ba6e921125268040b46f9ce5f5e",
+            "httpsProxy": "http://201678:D8TMz2SjqYSz@80.65.222.147:8800",
+        }
+
+        record = logging.LogRecord(
+            name="freqtrade.exchange.exchange",
+            level=logging.INFO,
+            pathname="",
+            lineno=403,
+            msg="Applying additional ccxt config: %s",
+            args=ccxt_kwargs,  # Python stores single dict arg directly, not as tuple
+            exc_info=None,
+        )
+
+        result = f.filter(record)
+        assert result is True
+
+        # Args should now be a tuple with a sanitized STRING
+        assert isinstance(record.args, tuple)
+        sanitized = record.args[0]
+        assert isinstance(sanitized, str)
+
+        # Verify secrets are redacted
+        assert "ed25519:GjzHM8W8G6QU1BgZjEqymm8csu3jexsbc7HoqHPaar4f" not in sanitized
+        assert "ed25519:JC5mjh84GkitnPrzvJLeN8AJ8CGZeKNfrvZmLJ9cBC6w" not in sanitized
+        assert "0xc2f9d39accd5e68e79241c105ffaabe52f662ba6e921125268040b46f9ce5f5e" not in sanitized
+        assert "201678:D8TMz2SjqYSz" not in sanitized
+
+        # Verify [REDACTED] appears
+        assert "[REDACTED]" in sanitized
+
+        # Verify non-sensitive data preserved
+        assert "swap" in sanitized
+        assert "500" in sanitized
+
+    def test_redacts_proxy_with_credentials(self):
+        """Test proxy URLs with embedded user:pass are redacted."""
+        f = SensitiveDataFilter()
+        text = "{'httpsProxy': 'http://201678:D8TMz2SjqYSz@80.65.222.147:8800'}"
+        result = f._sanitize(text)
+        assert "201678:D8TMz2SjqYSz" not in result
+        assert "[REDACTED]" in result
+
+    def test_redacts_password(self):
+        """Test password fields are redacted."""
+        f = SensitiveDataFilter()
+        text = "{'password': 'mysecretpassword'}"
+        result = f._sanitize(text)
+        assert "mysecretpassword" not in result
+        assert "[REDACTED]" in result
+
+    def test_redacts_account_id(self):
+        """Test accountId hex addresses are redacted."""
+        f = SensitiveDataFilter()
+        text = "{'accountId': '0xc2f9d39accd5e68e79241c105ffaabe52f662ba6e921125268040b46f9ce5f5e'}"
+        result = f._sanitize(text)
+        assert "0xc2f9d39accd5e68e79241c105ffaabe52f662ba6e921125268040b46f9ce5f5e" not in result
+        assert "[REDACTED]" in result
+
+    def test_redacts_wallet_address(self):
+        """Test walletAddress hex addresses are redacted."""
+        f = SensitiveDataFilter()
+        text = "{'walletAddress': '0x742d35cc6634c0532925a3b844bc454e4438f44e'}"
+        result = f._sanitize(text)
+        assert "0x742d35cc6634c0532925a3b844bc454e4438f44e" not in result
+        assert "[REDACTED]" in result
