@@ -2,6 +2,7 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
+from copy import deepcopy
 from datetime import datetime
 from enum import Enum
 from functools import partial
@@ -954,9 +955,7 @@ class ExchangeWS:
                     f"[OHLCV-READ] {pair}/{timeframe} from IP {assigned_ip}, "
                     f"candles={len(data)}"
                 )
-                # Snapshot to plain list first to avoid "deque mutated during
-                # iteration" when the WS thread appends/pops concurrently.
-                return [list(c) for c in list(data)]
+                return deepcopy(data)
 
             # No data from assigned IP - this shouldn't happen normally
             logger.warning(
@@ -966,8 +965,7 @@ class ExchangeWS:
 
             # Fallback to default/main exchange (no IP pool case)
             default_exchange = self._ws_exchanges.get('default', self._ccxt_object)
-            fallback = default_exchange.ohlcvs.get(pair, {}).get(timeframe, [])
-            return [list(c) for c in list(fallback)]
+            return deepcopy(default_exchange.ohlcvs.get(pair, {}).get(timeframe, []))
         except RuntimeError as e:
             # Capture runtime errors and retry
             raise TemporaryError(f"Error deepcopying: {e}") from e
