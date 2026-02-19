@@ -359,7 +359,7 @@ class ExchangeWS:
                 ).strftime('%H:%M:%S')
 
             logger.debug(
-                f"[METRICS] IP={ip} state={self._ip_states.get(ip, 'unknown').value if self._ip_states.get(ip) else 'unknown'} "
+                f"[METRICS] IP={ip} state={getattr(self._ip_states.get(ip, 'unknown'), 'value', 'unknown')} "
                 f"subscriptions={sub_count} "
                 f"candles_received={m.get('candles_received', 0)} "
                 f"last_candle={last_candle_str} "
@@ -962,7 +962,7 @@ class ExchangeWS:
             # No data from assigned IP - this shouldn't happen normally
             logger.warning(
                 f"[OHLCV-MISSING] No data for {pair}/{timeframe} from assigned IP {assigned_ip} "
-                f"(state={self._ip_states.get(assigned_ip, 'unknown').value})"
+                f"(state={getattr(self._ip_states.get(assigned_ip, 'unknown'), 'value', 'unknown')})"
             )
 
             # Fallback to default/main exchange (no IP pool case)
@@ -1168,7 +1168,7 @@ class ExchangeWS:
             logger.error(
                 f"[WS-CONN-ERROR] :{current_minute:02d} IP={assigned_ip} {pair}/{timeframe} "
                 f"error={type(e).__name__}: {str(e)[:200]} "
-                f"state={self._ip_states.get(assigned_ip, 'unknown').value if self._ip_states.get(assigned_ip) else 'unknown'} "
+                f"state={getattr(self._ip_states.get(assigned_ip, 'unknown'), 'value', 'unknown')} "
                 f"at={error_time}"
             )
 
