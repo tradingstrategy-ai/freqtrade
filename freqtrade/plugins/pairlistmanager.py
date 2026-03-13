@@ -3,6 +3,7 @@ PairList manager class
 """
 
 import logging
+from datetime import datetime
 from functools import partial
 
 from cachetools import LRUCache, TTLCache, cached
@@ -56,6 +57,7 @@ class PairListManager(LoggingMixin):
             )
 
         self._check_backtest()
+        self._current_time: datetime | None = None
         self._not_expiring_cache: LRUCache = LRUCache(maxsize=1)
 
         refresh_period = config.get("pairlist_refresh_period", 3600)
@@ -133,8 +135,26 @@ class PairListManager(LoggingMixin):
     def _get_cached_tickers(self) -> Tickers:
         return self._exchange.get_tickers()
 
-    def refresh_pairlist(self) -> None:
-        """Run pairlist through all configured Pairlist Handlers."""
+    def refresh_pairlist(
+        self,
+        only_first: bool = False,
+        pairs: list[str] | None = None,
+        current_time: datetime | None = None,
+    ) -> None:
+        """
+        Run pairlist through all configured Pairlist Handlers.
+
+        :param only_first: If True, only run the first PairList handler (the generator)
+            and skip all subsequent filters. Used during backtesting startup to ensure
+            historic data is loaded for the complete universe of pairs that the
+            generator can produce (even if later filters would reduce the list size).
+        :param pairs: Optional list of pairs to intersect with the generated pairlist.
+            Only pairs present both in the generated list and this parameter are kept.
+            Used in backtesting to filter out pairs with no available data.
+        :param current_time: Current backtest time. Stored on instance so pairlist
+            handlers can access it via self._pairlistmanager._current_time.
+        """
+        self._current_time = current_time
         # Tickers should be cached to avoid calling the exchange on each call.
         tickers: dict = {}
         if self._tickers_needed:
@@ -143,14 +163,24 @@ class PairListManager(LoggingMixin):
         # Generate the pairlist with first Pairlist Handler in the chain
         pairlist = self._pairlist_handlers[0].gen_pairlist(tickers)
 
-        # Process all Pairlist Handlers in the chain
-        # except for the first one, which is the generator.
-        for pairlist_handler in self._pairlist_handlers[1:]:
-            pairlist = pairlist_handler.filter_pairlist(pairlist, tickers)
+        # Optional intersection with an explicit list of pairs (used in backtesting)
+        if pairs is not None:
+            pairlist = [p for p in pairlist if p in pairs]
+
+        if not only_first:
+            # Process all Pairlist Handlers in the chain
+            # except for the first one, which is the generator.
+            for pairlist_handler in self._pairlist_handlers[1:]:
+                pairlist = pairlist_handler.filter_pairlist(pairlist, tickers)
 
         # Validation against blacklist happens after the chain of Pairlist Handlers
         # to ensure blacklist is respected.
         pairlist = self.verify_blacklist(pairlist, logger.warning)
+
+        if current_time is not None:
+            logger.info(
+                f"Pairlist refreshed at {current_time}: {len(pairlist)} pairs"
+            )
 
         self.log_once(f"Whitelist with {len(pairlist)} pairs: {pairlist}", logger.info)
 
