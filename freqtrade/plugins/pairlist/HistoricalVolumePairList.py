@@ -23,7 +23,7 @@ Usage in config (as a filter after StaticPairList):
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -295,7 +295,7 @@ class HistoricalVolumePairList(IPairList):
         # Get current backtest time from pairlist manager
         current_time = self._pairlistmanager._current_time
         if current_time is None:
-            current_time = datetime.utcnow()
+            current_time = datetime.now(timezone.utc)
 
         day_str = str(current_time.date())
 

@@ -2729,7 +2729,7 @@ def test_time_pair_generator_refresh_pairlist(mocker, default_conf, dynamic_pair
         "freqtrade.plugins.pairlistmanager.PairListManager.refresh_pairlist"
     )
 
-    # Simulate 2 candles
+    # Simulate 2 candles on the SAME day — refresh fires once per date
     start_date = datetime(2025, 1, 1, 0, 0, tzinfo=UTC)
     end_date = start_date + timedelta(minutes=10)
     pairs = default_conf["exchange"]["pair_whitelist"]
@@ -2739,6 +2739,34 @@ def test_time_pair_generator_refresh_pairlist(mocker, default_conf, dynamic_pair
     list(backtesting.time_pair_generator(start_date, end_date, pairs, data))
 
     if dynamic_pairlist:
+        # Both candles are on 2025-01-01, so only 1 refresh (date-change optimization)
+        assert refresh_mock.call_count == 1
+    else:
+        assert refresh_mock.call_count == 0
+
+
+@pytest.mark.parametrize("dynamic_pairlist", [True, False])
+def test_time_pair_generator_refresh_pairlist_date_boundary(mocker, default_conf, dynamic_pairlist):
+    """Verify refresh fires again when the backtest crosses a date boundary."""
+    patch_exchange(mocker)
+    default_conf["enable_dynamic_pairlist"] = dynamic_pairlist
+    backtesting = Backtesting(default_conf)
+    backtesting._set_strategy(backtesting.strategylist[0])
+
+    refresh_mock = mocker.patch(
+        "freqtrade.plugins.pairlistmanager.PairListManager.refresh_pairlist"
+    )
+
+    # Span two dates: 23:55 on Jan 1 → 00:05 on Jan 2 (3 candles, 2 dates)
+    start_date = datetime(2025, 1, 1, 23, 50, tzinfo=UTC)
+    end_date = start_date + timedelta(minutes=15)
+    pairs = default_conf["exchange"]["pair_whitelist"]
+    data = {pair: [] for pair in pairs}
+
+    list(backtesting.time_pair_generator(start_date, end_date, pairs, data))
+
+    if dynamic_pairlist:
+        # 23:55 (Jan 1) and 00:00 + 00:05 (Jan 2) → 2 distinct dates → 2 refreshes
         assert refresh_mock.call_count == 2
     else:
         assert refresh_mock.call_count == 0

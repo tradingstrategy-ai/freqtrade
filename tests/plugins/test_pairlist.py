@@ -31,9 +31,12 @@ from tests.conftest import (
 )
 
 
-# Exclude RemotePairList from tests.
-# It has a mandatory parameter, and requires special handling, which happens in test_remotepairlist.
-TESTABLE_PAIRLISTS = [p for p in AVAILABLE_PAIRLISTS if p not in ["RemotePairList"]]
+# Exclude pairlists with mandatory parameters that require special handling.
+# RemotePairList: tested in test_remotepairlist.py
+# HistoricalVolumePairList: tested in test_historical_volume_pairlist.py (requires data_source_dir)
+TESTABLE_PAIRLISTS = [
+    p for p in AVAILABLE_PAIRLISTS if p not in ["RemotePairList", "HistoricalVolumePairList"]
+]
 
 
 @pytest.fixture(scope="function")
