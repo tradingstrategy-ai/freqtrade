@@ -253,9 +253,12 @@ class HistoricalVolumePairList(IPairList):
             self._daily_rankings = {}
             return
 
+        # .shift(1) so day D uses D-lookback..D-1 (not D-lookback+1..D)
+        # This prevents look-ahead bias: we must not include day D's volume
+        # when deciding which pairs to trade on day D.
         rolling_vol = self._volume_data.rolling(
             window=self._lookback_days, min_periods=1
-        ).sum()
+        ).sum().shift(1)
 
         self._daily_rankings = {}
 
