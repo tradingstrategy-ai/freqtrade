@@ -798,6 +798,13 @@ class Backtesting:
         """
         if self._try_close_open_order(order, trade, current_time, row):
             self._apply_phase1_exit_fill(trade, order.ft_price, current_time)
+            if self._phase1_trade_fully_closed(trade):
+                trade.close_date = current_time
+                trade.close(order.ft_price, show_msg=False)
+                LocalTrade.close_bt_trade(trade)
+                self.wallets.update()
+                self.run_protections(pair, current_time, trade.trade_direction)
+                return
             sub_trade = order.safe_amount_after_fee != trade.amount
             if sub_trade:
                 trade.recalc_trade_from_orders()
@@ -842,6 +849,16 @@ class Backtesting:
         trade.set_custom_data("phase1_sleeves", updated_sleeves)
         trade.set_custom_data("phase1_closed_sleeves", closed_sleeves)
         trade.set_custom_data("phase1_pending_exit_plan", None)
+
+    @staticmethod
+    def _phase1_trade_fully_closed(trade: LocalTrade) -> bool:
+        sleeves = trade.get_custom_data("phase1_sleeves") or []
+        if not sleeves:
+            return False
+        return all(
+            sleeve.get("closed_at") is not None or float(sleeve.get("quantity", 0.0)) <= 0.0
+            for sleeve in sleeves
+        )
 
     def _get_exit_for_signal(
         self,
@@ -1053,7 +1070,17 @@ class Backtesting:
         ]
         if not sleeves_to_close:
             return None
-        exit_amount = sum(float(sleeve["quantity"]) for sleeve in sleeves_to_close)
+        open_sleeves = [
+            sleeve
+            for sleeve in sleeves
+            if sleeve["side"] == side
+            and sleeve["closed_at"] is None
+            and float(sleeve["quantity"]) > 0
+        ]
+        if len(sleeves_to_close) == len(open_sleeves):
+            exit_amount = trade.amount
+        else:
+            exit_amount = sum(float(sleeve["quantity"]) for sleeve in sleeves_to_close)
         if exit_amount <= 0:
             return None
         return {
