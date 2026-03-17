@@ -4,6 +4,7 @@ Various tool function for Freqtrade and scripts
 
 import gzip
 import logging
+import math
 from collections.abc import Iterator, Mapping
 from io import StringIO
 from pathlib import Path
@@ -19,13 +20,33 @@ from freqtrade.enums import SignalTagType, SignalType
 logger = logging.getLogger(__name__)
 
 
+def _sanitize_json_data(data: Any) -> Any:
+    """
+    Recursively replace non-JSON-compliant numeric sentinels with None.
+    """
+    if isinstance(data, float):
+        return data if math.isfinite(data) else None
+    if isinstance(data, Mapping):
+        return {key: _sanitize_json_data(value) for key, value in data.items()}
+    if isinstance(data, list):
+        return [_sanitize_json_data(value) for value in data]
+    if isinstance(data, tuple):
+        return [_sanitize_json_data(value) for value in data]
+    return data
+
+
 def dump_json_to_file(file_obj: TextIO, data: Any) -> None:
     """
     Dump JSON data into a file object
     :param file_obj: File object to write to
     :param data: JSON Data to save
     """
-    rapidjson.dump(data, file_obj, default=str, number_mode=rapidjson.NM_NATIVE)
+    rapidjson.dump(
+        _sanitize_json_data(data),
+        file_obj,
+        default=str,
+        number_mode=rapidjson.NM_NATIVE,
+    )
 
 
 def file_dump_json(filename: Path, data: Any, is_zip: bool = False, log: bool = True) -> None:

@@ -828,22 +828,46 @@ class Backtesting:
             return
 
         closing_ids = set(pending_exit_plan.get("sleeve_ids", []))
+        sleeve_exit_map = {
+            item["sleeve_id"]: item for item in pending_exit_plan.get("sleeve_exits", [])
+        }
         updated_sleeves = []
         closed_sleeves = trade.get_custom_data("phase1_closed_sleeves") or []
         for sleeve in sleeves:
             sleeve_copy = dict(sleeve)
             if sleeve_copy["sleeve_id"] in closing_ids and sleeve_copy["closed_at"] is None:
-                qty = float(sleeve_copy["quantity"])
+                planned_exit = sleeve_exit_map.get(sleeve_copy["sleeve_id"])
+                current_qty = float(sleeve_copy["quantity"])
+                qty = (
+                    float(planned_exit["quantity"])
+                    if planned_exit is not None
+                    else current_qty
+                )
+                qty = min(qty, current_qty)
+                if qty <= 0:
+                    updated_sleeves.append(sleeve_copy)
+                    continue
                 avg_price = float(sleeve_copy["avg_price"])
                 if sleeve_copy["side"] == "long":
                     realized = (exit_price - avg_price) * qty
                 else:
                     realized = (avg_price - exit_price) * qty
                 sleeve_copy["realized_pnl"] = float(sleeve_copy.get("realized_pnl", 0.0)) + realized
-                sleeve_copy["quantity"] = 0.0
-                sleeve_copy["closed_at"] = current_time.isoformat()
+                remaining_qty = current_qty - qty
+                sleeve_copy["quantity"] = remaining_qty
                 sleeve_copy["updated_at"] = current_time.isoformat()
-                closed_sleeves.append(sleeve_copy)
+                if "quantity_units" in sleeve_copy:
+                    planned_units = (
+                        float(planned_exit["quantity_units"])
+                        if planned_exit is not None and planned_exit.get("quantity_units") is not None
+                        else float(sleeve_copy["quantity_units"])
+                    )
+                    remaining_units = max(0.0, float(sleeve_copy["quantity_units"]) - planned_units)
+                    sleeve_copy["quantity_units"] = remaining_units
+                if remaining_qty <= 0.0:
+                    sleeve_copy["quantity"] = 0.0
+                    sleeve_copy["closed_at"] = current_time.isoformat()
+                    closed_sleeves.append(dict(sleeve_copy))
             updated_sleeves.append(sleeve_copy)
 
         trade.set_custom_data("phase1_sleeves", updated_sleeves)
@@ -1052,24 +1076,76 @@ class Backtesting:
         if not exit_intents:
             return None
         side = "short" if trade.is_short else "long"
-        strategy_names = {
-            intent["strategy_name"]
+        matching_intents = [
+            intent
             for intent in exit_intents
-            if intent.get("side") == side and intent.get("action") == "close"
-        }
-        if not strategy_names:
+            if intent.get("side") == side and intent.get("action") in ("close", "reduce")
+        ]
+        if not matching_intents:
             return None
 
-        sleeves_to_close = [
-            sleeve
-            for sleeve in sleeves
-            if sleeve["strategy_name"] in strategy_names
-            and sleeve["side"] == side
-            and sleeve["closed_at"] is None
-            and float(sleeve["quantity"]) > 0
-        ]
-        if not sleeves_to_close:
+        sleeve_exits: list[dict] = []
+        for intent in matching_intents:
+            matching_sleeves = [
+                sleeve
+                for sleeve in sleeves
+                if sleeve["strategy_name"] == intent["strategy_name"]
+                and sleeve["side"] == side
+                and sleeve["closed_at"] is None
+                and float(sleeve["quantity"]) > 0
+            ]
+            if not matching_sleeves:
+                continue
+            if intent.get("action") == "close":
+                for sleeve in matching_sleeves:
+                    sleeve_exits.append(
+                        {
+                            "sleeve_id": sleeve["sleeve_id"],
+                            "quantity": float(sleeve["quantity"]),
+                            "quantity_units": float(
+                                sleeve.get("quantity_units", sleeve["quantity"])
+                            ),
+                            "close": True,
+                        }
+                    )
+                continue
+
+            remaining_units = float(intent.get("quantity") or 0.0)
+            if remaining_units <= 0.0:
+                continue
+            for sleeve in matching_sleeves:
+                available_units = float(sleeve.get("quantity_units", sleeve["quantity"]))
+                if available_units <= 0.0:
+                    continue
+                reducing_units = min(remaining_units, available_units)
+                actual_qty = float(sleeve["quantity"]) * reducing_units / available_units
+                sleeve_exits.append(
+                    {
+                        "sleeve_id": sleeve["sleeve_id"],
+                        "quantity": actual_qty,
+                        "quantity_units": reducing_units,
+                        "close": reducing_units >= available_units,
+                    }
+                )
+                remaining_units -= reducing_units
+                if remaining_units <= 0.0:
+                    break
+            if remaining_units > 0.0:
+                return None
+
+        if not sleeve_exits:
             return None
+        sleeve_exit_by_id: dict[str, dict] = {}
+        for item in sleeve_exits:
+            existing = sleeve_exit_by_id.get(item["sleeve_id"])
+            if existing is None:
+                sleeve_exit_by_id[item["sleeve_id"]] = dict(item)
+                continue
+            existing["quantity"] += item["quantity"]
+            existing["quantity_units"] += item["quantity_units"]
+            existing["close"] = existing["close"] or item["close"]
+        sleeve_exits = list(sleeve_exit_by_id.values())
+
         open_sleeves = [
             sleeve
             for sleeve in sleeves
@@ -1077,17 +1153,24 @@ class Backtesting:
             and sleeve["closed_at"] is None
             and float(sleeve["quantity"]) > 0
         ]
-        if len(sleeves_to_close) == len(open_sleeves):
+        full_open_close = len(sleeve_exits) == len(open_sleeves) and all(
+            item["close"] for item in sleeve_exits
+        )
+        if full_open_close:
             exit_amount = trade.amount
         else:
-            exit_amount = sum(float(sleeve["quantity"]) for sleeve in sleeves_to_close)
+            exit_amount = sum(float(item["quantity"]) for item in sleeve_exits)
         if exit_amount <= 0:
             return None
+        strategy_names = sorted({intent["strategy_name"] for intent in matching_intents})
+        only_full_close = all(item["close"] for item in sleeve_exits)
+        exit_reason_prefix = "phase1_sleeve_exit" if only_full_close else "phase1_sleeve_reduce"
         return {
-            "strategy_names": sorted(strategy_names),
-            "sleeve_ids": [sleeve["sleeve_id"] for sleeve in sleeves_to_close],
+            "strategy_names": strategy_names,
+            "sleeve_ids": [item["sleeve_id"] for item in sleeve_exits],
+            "sleeve_exits": sleeve_exits,
             "exit_amount": exit_amount,
-            "exit_reason": f"phase1_sleeve_exit:{','.join(sorted(strategy_names))}",
+            "exit_reason": f"{exit_reason_prefix}:{','.join(strategy_names)}",
         }
 
     def _run_funding_fees(self, trade: LocalTrade, current_time: datetime, force: bool = False):
