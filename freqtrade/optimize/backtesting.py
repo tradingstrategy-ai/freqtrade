@@ -4,6 +4,7 @@
 This module contains the backtesting logic
 """
 
+import json
 import logging
 from collections import defaultdict
 from copy import deepcopy
@@ -1094,6 +1095,10 @@ class Backtesting:
             if len(row) >= PHASE1_NETTING_INTENTS_IDX + 1
             else None
         )
+        phase1_plan = self._build_phase1_net_entry_plan(
+            phase1_netting_intents,
+            direction,
+        )
         # let's call the custom entry price, using the open price as default price
         order_type = self.strategy.order_types["entry"]
         pos_adjust = trade is not None and requested_rate is None
@@ -1120,6 +1125,8 @@ class Backtesting:
         # replace proposed rate if another rate was requested
         propose_rate = requested_rate if requested_rate else propose_rate
         stake_amount = requested_stake if requested_stake else stake_amount
+        if trade is None and phase1_plan and phase1_plan["net_quantity_delta"] > 0:
+            stake_amount = stake_amount * phase1_plan["net_quantity_delta"]
 
         if not stake_amount:
             # In case of pos adjust, still return the original trade
@@ -1198,6 +1205,7 @@ class Backtesting:
                 self._attach_phase1_trade_metadata(
                     trade,
                     phase1_netting_intents,
+                    phase1_plan,
                     current_time,
                 )
             elif self.handle_similar_order(
@@ -1241,16 +1249,76 @@ class Backtesting:
     def _attach_phase1_trade_metadata(
         trade: LocalTrade,
         phase1_netting_intents: str | None,
+        phase1_plan: dict | None,
         current_time: datetime,
     ) -> None:
         """Attach experimental contributor intent payload to backtest trades."""
-        if not phase1_netting_intents:
+        if not phase1_netting_intents and not phase1_plan:
             return
-        trade.set_custom_data("phase1_netting_intents", phase1_netting_intents)
+        if phase1_netting_intents:
+            trade.set_custom_data("phase1_netting_intents", phase1_netting_intents)
+        if phase1_plan:
+            trade.set_custom_data("phase1_net_plan", phase1_plan)
+            trade.set_custom_data("phase1_sleeves", phase1_plan.get("sleeves", []))
+            trade.set_custom_data(
+                "phase1_net_quantity_delta",
+                phase1_plan.get("net_quantity_delta"),
+            )
         trade.set_custom_data(
             "phase1_netting_initialized_at",
             current_time.isoformat(),
         )
+
+    @staticmethod
+    def _build_phase1_net_entry_plan(
+        phase1_netting_intents: str | None,
+        direction: LongShort,
+    ) -> dict | None:
+        """Aggregate same-direction contributor intents into one entry plan."""
+        if not phase1_netting_intents:
+            return None
+        intents = json.loads(phase1_netting_intents)
+        if not intents:
+            return None
+        side = "long" if direction == "long" else "short"
+        if any(intent.get("side") != side for intent in intents):
+            return None
+
+        net_quantity_delta = 0.0
+        sleeves: list[dict] = []
+        strategy_names: list[str] = []
+        for intent in intents:
+            quantity = float(intent["quantity"])
+            action = intent["action"]
+            if action in ("open", "increase"):
+                net_quantity_delta += quantity
+            else:
+                net_quantity_delta -= quantity
+            strategy_name = intent["strategy_name"]
+            strategy_names.append(strategy_name)
+            sleeves.append(
+                {
+                    "sleeve_id": intent["sleeve_id"],
+                    "strategy_name": strategy_name,
+                    "pair": intent["pair"],
+                    "side": intent["side"],
+                    "quantity": quantity,
+                    "avg_price": float(intent["price"]),
+                    "opened_at": intent["timestamp"],
+                    "updated_at": intent["timestamp"],
+                    "realized_pnl": 0.0,
+                    "closed_at": None,
+                }
+            )
+        if net_quantity_delta <= 0:
+            return None
+        return {
+            "direction": direction,
+            "contributor_count": len(sleeves),
+            "net_quantity_delta": net_quantity_delta,
+            "strategy_names": strategy_names,
+            "sleeves": sleeves,
+        }
 
     def handle_left_open(
         self, open_trades: dict[str, list[LocalTrade]], data: dict[str, list[tuple]]

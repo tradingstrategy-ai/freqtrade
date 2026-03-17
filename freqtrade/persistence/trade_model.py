@@ -669,6 +669,9 @@ class LocalTrade:
         orders_json = [order.to_json(self.entry_side, minified) for order in filled_or_open_orders]
         phase1_netting_intents = self.get_custom_data("phase1_netting_intents")
         phase1_netting_initialized_at = self.get_custom_data("phase1_netting_initialized_at")
+        phase1_net_plan = self.get_custom_data("phase1_net_plan")
+        phase1_sleeves = self.get_custom_data("phase1_sleeves")
+        phase1_net_quantity_delta = self.get_custom_data("phase1_net_quantity_delta")
 
         result = {
             "trade_id": self.id,
@@ -764,6 +767,12 @@ class LocalTrade:
             result["phase1_netting_intents"] = phase1_netting_intents
         if phase1_netting_initialized_at is not None:
             result["phase1_netting_initialized_at"] = phase1_netting_initialized_at
+        if phase1_net_plan is not None:
+            result["phase1_net_plan"] = phase1_net_plan
+        if phase1_sleeves is not None:
+            result["phase1_sleeves"] = phase1_sleeves
+        if phase1_net_quantity_delta is not None:
+            result["phase1_net_quantity_delta"] = phase1_net_quantity_delta
         return result
 
     @staticmethod
