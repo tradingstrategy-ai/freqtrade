@@ -8,7 +8,7 @@ import json
 import logging
 from collections import defaultdict
 from copy import deepcopy
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from numpy import isnan, nan
@@ -798,6 +798,13 @@ class Backtesting:
         Takes an exit order and processes it, potentially closing the trade.
         """
         if self._try_close_open_order(order, trade, current_time, row):
+            if (
+                not trade.get_custom_data("phase1_pending_exit_plan")
+                and Backtesting._phase1_is_full_trade_exit(order, trade)
+            ):
+                exit_plan = Backtesting._build_phase1_full_trade_exit_plan(trade)
+                if exit_plan:
+                    trade.set_custom_data("phase1_pending_exit_plan", exit_plan)
             self._apply_phase1_exit_fill(trade, order.ft_price, current_time)
             if self._phase1_trade_fully_closed(trade):
                 trade.close_date = current_time
@@ -873,6 +880,7 @@ class Backtesting:
 
         trade.set_custom_data("phase1_sleeves", updated_sleeves)
         trade.set_custom_data("phase1_closed_sleeves", closed_sleeves)
+        Backtesting._rebase_phase1_trade_to_single_open_sleeve(trade, updated_sleeves)
         trade.set_custom_data("phase1_pending_exit_plan", None)
 
     @staticmethod
@@ -884,6 +892,68 @@ class Backtesting:
             sleeve.get("closed_at") is not None or float(sleeve.get("quantity", 0.0)) <= 0.0
             for sleeve in sleeves
         )
+
+    @staticmethod
+    def _rebase_phase1_trade_to_single_open_sleeve(
+        trade: LocalTrade,
+        sleeves: list[dict],
+    ) -> None:
+        open_sleeves = [
+            sleeve
+            for sleeve in sleeves
+            if sleeve.get("closed_at") is None and float(sleeve.get("quantity", 0.0)) > 0.0
+        ]
+        if len(open_sleeves) != 1:
+            return
+        remaining_sleeve = open_sleeves[0]
+        trade.enter_tag = f"{remaining_sleeve['strategy_name']}|"
+        trade.open_rate = float(remaining_sleeve.get("avg_price") or trade.open_rate)
+        opened_at = datetime.fromisoformat(remaining_sleeve["opened_at"])
+        if opened_at.tzinfo is not None:
+            opened_at = opened_at.astimezone(timezone.utc).replace(tzinfo=None)
+        trade.open_date = opened_at
+
+    @staticmethod
+    def _phase1_is_full_trade_exit(order: Order, trade: LocalTrade) -> bool:
+        return abs(float(order.safe_amount_after_fee) - float(trade.amount)) <= 1e-12
+
+    @staticmethod
+    def _build_phase1_full_trade_exit_plan(trade: LocalTrade) -> dict | None:
+        sleeves = trade.get_custom_data("phase1_sleeves") or []
+        if not sleeves:
+            return None
+        side = "short" if trade.is_short else "long"
+        open_sleeves = [
+            sleeve
+            for sleeve in sleeves
+            if sleeve.get("side") == side
+            and sleeve.get("closed_at") is None
+            and float(sleeve.get("quantity", 0.0)) > 0.0
+        ]
+        if not open_sleeves:
+            return None
+        strategy_names = sorted(
+            {str(sleeve["strategy_name"]) for sleeve in open_sleeves if sleeve.get("strategy_name")}
+        )
+        sleeve_exits = [
+            {
+                "sleeve_id": sleeve["sleeve_id"],
+                "quantity": float(sleeve["quantity"]),
+                "quantity_units": float(sleeve.get("quantity_units", sleeve["quantity"])),
+                "close": True,
+            }
+            for sleeve in open_sleeves
+        ]
+        exit_amount = sum(float(item["quantity"]) for item in sleeve_exits)
+        if exit_amount <= 0.0:
+            return None
+        return {
+            "strategy_names": strategy_names,
+            "sleeve_ids": [item["sleeve_id"] for item in sleeve_exits],
+            "sleeve_exits": sleeve_exits,
+            "exit_amount": exit_amount,
+            "exit_reason": f"phase1_sleeve_exit:{','.join(strategy_names)}",
+        }
 
     def _get_exit_for_signal(
         self,
@@ -1037,6 +1107,14 @@ class Backtesting:
                 high=row[HIGH_IDX],
             )
             for exit_ in exits:
+                phase1_owner_exit_trade = self._check_phase1_owner_exit(
+                    trade,
+                    row,
+                    current_time,
+                    exit_,
+                )
+                if phase1_owner_exit_trade:
+                    return phase1_owner_exit_trade
                 t = self._get_exit_for_signal(trade, row, exit_, current_time)
                 if t:
                     return t
@@ -1165,6 +1243,71 @@ class Backtesting:
             for intent in exit_intents
         )
 
+    def _check_phase1_owner_exit(
+        self,
+        trade: LocalTrade,
+        row: tuple,
+        current_time: datetime,
+        exit_: ExitCheckTuple,
+    ) -> LocalTrade | None:
+        if exit_.exit_type not in (ExitType.CUSTOM_EXIT, ExitType.EXIT_SIGNAL):
+            return None
+        exit_plan = self._build_phase1_owner_exit_plan(trade)
+        if not exit_plan:
+            return None
+        trade.set_custom_data("phase1_pending_exit_plan", exit_plan)
+        trade.exit_reason = exit_plan["exit_reason"]
+        return self._exit_trade(
+            trade,
+            row,
+            row[OPEN_IDX],
+            exit_plan["exit_amount"],
+            exit_plan["exit_reason"],
+        )
+
+    @staticmethod
+    def _build_phase1_owner_exit_plan(trade: LocalTrade) -> dict | None:
+        sleeves = trade.get_custom_data("phase1_sleeves") or []
+        if not sleeves:
+            return None
+        side = "short" if trade.is_short else "long"
+        open_sleeves = [
+            sleeve
+            for sleeve in sleeves
+            if sleeve.get("side") == side
+            and sleeve.get("closed_at") is None
+            and float(sleeve.get("quantity", 0.0)) > 0.0
+        ]
+        if len(open_sleeves) <= 1:
+            return None
+        owner_strategy_name = (trade.enter_tag or "").split("|", 1)[0]
+        if not owner_strategy_name:
+            return None
+        owner_sleeve_exits = []
+        for sleeve in open_sleeves:
+            if sleeve.get("strategy_name") != owner_strategy_name:
+                continue
+            owner_sleeve_exits.append(
+                {
+                    "sleeve_id": sleeve["sleeve_id"],
+                    "quantity": float(sleeve["quantity"]),
+                    "quantity_units": float(sleeve.get("quantity_units", sleeve["quantity"])),
+                    "close": True,
+                }
+            )
+        if not owner_sleeve_exits:
+            return None
+        exit_amount = sum(float(item["quantity"]) for item in owner_sleeve_exits)
+        if exit_amount <= 0.0:
+            return None
+        return {
+            "strategy_names": [owner_strategy_name],
+            "sleeve_ids": [item["sleeve_id"] for item in owner_sleeve_exits],
+            "sleeve_exits": owner_sleeve_exits,
+            "exit_amount": exit_amount,
+            "exit_reason": f"phase1_sleeve_exit:{owner_strategy_name}",
+        }
+
     @staticmethod
     def _build_phase1_net_exit_plan(
         trade: LocalTrade,
@@ -1265,7 +1408,16 @@ class Backtesting:
             exit_amount = sum(float(item["quantity"]) for item in sleeve_exits)
         if exit_amount <= 0:
             return None
-        strategy_names = sorted({intent["strategy_name"] for intent in matching_intents})
+        strategy_name_by_sleeve_id = {
+            sleeve["sleeve_id"]: sleeve["strategy_name"] for sleeve in open_sleeves
+        }
+        strategy_names = sorted(
+            {
+                strategy_name_by_sleeve_id[item["sleeve_id"]]
+                for item in sleeve_exits
+                if item["sleeve_id"] in strategy_name_by_sleeve_id
+            }
+        )
         only_full_close = all(item["close"] for item in sleeve_exits)
         exit_reason_prefix = "phase1_sleeve_exit" if only_full_close else "phase1_sleeve_reduce"
         return {
