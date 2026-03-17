@@ -90,6 +90,7 @@ SHORT_IDX = 7
 ESHORT_IDX = 8  # Exit short
 ENTER_TAG_IDX = 9
 EXIT_TAG_IDX = 10
+PHASE1_NETTING_INTENTS_IDX = 11
 
 # Every change to this headers list must evaluate further usages of the resulting tuple
 # and eventually change the constants for indexes at the top
@@ -105,6 +106,7 @@ HEADERS = [
     "exit_short",
     "enter_tag",
     "exit_tag",
+    "phase1_netting_intents",
 ]
 
 
@@ -496,7 +498,11 @@ class Backtesting:
             # To avoid using data from future, we use entry/exit signals shifted
             # from the previous candle
             for col in HEADERS[5:]:
-                tag_col = col in ("enter_tag", "exit_tag")
+                tag_col = col in (
+                    "enter_tag",
+                    "exit_tag",
+                    "phase1_netting_intents",
+                )
                 if col in df_analyzed.columns:
                     df_analyzed[col] = (
                         df_analyzed.loc[:, col]
@@ -1083,6 +1089,11 @@ class Backtesting:
 
         current_time = row[DATE_IDX].to_pydatetime()
         entry_tag = entry_tag1 or (row[ENTER_TAG_IDX] if len(row) >= ENTER_TAG_IDX + 1 else None)
+        phase1_netting_intents = (
+            row[PHASE1_NETTING_INTENTS_IDX]
+            if len(row) >= PHASE1_NETTING_INTENTS_IDX + 1
+            else None
+        )
         # let's call the custom entry price, using the open price as default price
         order_type = self.strategy.order_types["entry"]
         pos_adjust = trade is not None and requested_rate is None
@@ -1184,6 +1195,11 @@ class Backtesting:
                     orders=[],
                 )
                 LocalTrade.add_bt_trade(trade)
+                self._attach_phase1_trade_metadata(
+                    trade,
+                    phase1_netting_intents,
+                    current_time,
+                )
             elif self.handle_similar_order(
                 trade, propose_rate, amount, trade.entry_side, current_time
             ):
@@ -1220,6 +1236,21 @@ class Backtesting:
             trade.recalc_trade_from_orders()
 
         return trade
+
+    @staticmethod
+    def _attach_phase1_trade_metadata(
+        trade: LocalTrade,
+        phase1_netting_intents: str | None,
+        current_time: datetime,
+    ) -> None:
+        """Attach experimental contributor intent payload to backtest trades."""
+        if not phase1_netting_intents:
+            return
+        trade.set_custom_data("phase1_netting_intents", phase1_netting_intents)
+        trade.set_custom_data(
+            "phase1_netting_initialized_at",
+            current_time.isoformat(),
+        )
 
     def handle_left_open(
         self, open_trades: dict[str, list[LocalTrade]], data: dict[str, list[tuple]]
@@ -1530,6 +1561,7 @@ class Backtesting:
         detail_data.loc[:, "exit_short"] = row[ESHORT_IDX]
         detail_data.loc[:, "enter_tag"] = row[ENTER_TAG_IDX]
         detail_data.loc[:, "exit_tag"] = row[EXIT_TAG_IDX]
+        detail_data.loc[:, "phase1_netting_intents"] = row[PHASE1_NETTING_INTENTS_IDX]
         return detail_data[HEADERS].values.tolist()
 
     def _time_generator(self, start_date: datetime, end_date: datetime):

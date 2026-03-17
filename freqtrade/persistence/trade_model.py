@@ -667,8 +667,10 @@ class LocalTrade:
         """
         filled_or_open_orders = self.select_filled_or_open_orders()
         orders_json = [order.to_json(self.entry_side, minified) for order in filled_or_open_orders]
+        phase1_netting_intents = self.get_custom_data("phase1_netting_intents")
+        phase1_netting_initialized_at = self.get_custom_data("phase1_netting_initialized_at")
 
-        return {
+        result = {
             "trade_id": self.id,
             "pair": self.pair,
             "base_currency": self.safe_base_currency,
@@ -758,6 +760,11 @@ class LocalTrade:
             "has_open_orders": self.has_open_orders,
             "orders": orders_json,
         }
+        if phase1_netting_intents is not None:
+            result["phase1_netting_intents"] = phase1_netting_intents
+        if phase1_netting_initialized_at is not None:
+            result["phase1_netting_initialized_at"] = phase1_netting_initialized_at
+        return result
 
     @staticmethod
     def reset_trades() -> None:
