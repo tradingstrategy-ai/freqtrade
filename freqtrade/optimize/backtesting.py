@@ -9,6 +9,7 @@ import logging
 from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 from numpy import isnan, nan
 from pandas import DataFrame, Series
@@ -1044,10 +1045,16 @@ class Backtesting:
     def _check_phase1_sleeve_exit(
         self, trade: LocalTrade, row: tuple, current_time: datetime
     ) -> LocalTrade | None:
-        exit_payload = (
+        row_exit_payload = (
             row[PHASE1_NETTING_EXIT_INTENTS_IDX]
             if len(row) >= PHASE1_NETTING_EXIT_INTENTS_IDX + 1
             else None
+        )
+        exit_payload = self._collect_phase1_live_exit_intents(
+            trade,
+            row,
+            current_time,
+            row_exit_payload,
         )
         exit_plan = self._build_phase1_net_exit_plan(trade, exit_payload)
         if not exit_plan:
@@ -1060,6 +1067,102 @@ class Backtesting:
             row[OPEN_IDX],
             exit_plan["exit_amount"],
             exit_plan["exit_reason"],
+        )
+
+    def _collect_phase1_live_exit_intents(
+        self,
+        trade: LocalTrade,
+        row: tuple,
+        current_time: datetime,
+        row_exit_payload: str | None,
+    ) -> str | None:
+        exit_intents = json.loads(row_exit_payload) if row_exit_payload else []
+        sleeves = trade.get_custom_data("phase1_sleeves") or []
+        if not sleeves:
+            return row_exit_payload
+
+        open_sleeves = [
+            sleeve
+            for sleeve in sleeves
+            if sleeve.get("closed_at") is None and float(sleeve.get("quantity", 0.0)) > 0.0
+        ]
+        if not open_sleeves:
+            return row_exit_payload
+
+        strategies = getattr(self.strategy, "_strategies", None)
+        if not isinstance(strategies, dict):
+            return row_exit_payload
+
+        for sleeve in open_sleeves:
+            strategy_name = sleeve.get("strategy_name")
+            if not strategy_name or self._phase1_has_exit_intent(
+                exit_intents,
+                strategy_name,
+                sleeve.get("side"),
+            ):
+                continue
+            sub_strategy = strategies.get(strategy_name)
+            if sub_strategy is None:
+                continue
+
+            sleeve_open_rate = float(sleeve.get("avg_price") or trade.open_rate)
+            current_rate = row[OPEN_IDX]
+            if trade.is_short:
+                current_profit = (
+                    (sleeve_open_rate - current_rate) / sleeve_open_rate
+                    if sleeve_open_rate
+                    else 0.0
+                )
+            else:
+                current_profit = (
+                    (current_rate - sleeve_open_rate) / sleeve_open_rate
+                    if sleeve_open_rate
+                    else 0.0
+                )
+            sleeve_trade = SimpleNamespace(
+                pair=trade.pair,
+                open_date_utc=datetime.fromisoformat(sleeve["opened_at"]),
+                open_rate=sleeve_open_rate,
+                enter_tag=strategy_name,
+                is_short=sleeve.get("side") == "short",
+                amount=float(sleeve.get("quantity", 0.0)),
+                stake_amount=float(sleeve.get("quantity", 0.0)) * sleeve_open_rate,
+            )
+            result = strategy_safe_wrapper(sub_strategy.custom_exit, default_retval=None)(
+                pair=trade.pair,
+                trade=sleeve_trade,
+                current_time=current_time,
+                current_rate=current_rate,
+                current_profit=current_profit,
+            )
+            if not result:
+                continue
+            exit_intents.append(
+                {
+                    "strategy_name": strategy_name,
+                    "pair": trade.pair,
+                    "side": sleeve["side"],
+                    "action": "close",
+                    "exit_tag": str(result),
+                    "timestamp": current_time.isoformat(),
+                }
+            )
+
+        if not exit_intents:
+            return None
+        return json.dumps(exit_intents, separators=(",", ":"))
+
+    @staticmethod
+    def _phase1_has_exit_intent(
+        exit_intents: list[dict],
+        strategy_name: str,
+        side: str | None,
+    ) -> bool:
+        return any(
+            intent.get("strategy_name") == strategy_name
+            and intent.get("side") == side
+            and intent.get("action") in ("close", "reduce")
+            for intent in exit_intents
         )
 
     @staticmethod
