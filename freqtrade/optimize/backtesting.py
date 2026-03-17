@@ -92,6 +92,7 @@ ESHORT_IDX = 8  # Exit short
 ENTER_TAG_IDX = 9
 EXIT_TAG_IDX = 10
 PHASE1_NETTING_INTENTS_IDX = 11
+PHASE1_NETTING_EXIT_INTENTS_IDX = 12
 
 # Every change to this headers list must evaluate further usages of the resulting tuple
 # and eventually change the constants for indexes at the top
@@ -108,6 +109,7 @@ HEADERS = [
     "enter_tag",
     "exit_tag",
     "phase1_netting_intents",
+    "phase1_netting_exit_intents",
 ]
 
 
@@ -503,6 +505,7 @@ class Backtesting:
                     "enter_tag",
                     "exit_tag",
                     "phase1_netting_intents",
+                    "phase1_netting_exit_intents",
                 )
                 if col in df_analyzed.columns:
                     df_analyzed[col] = (
@@ -794,6 +797,7 @@ class Backtesting:
         Takes an exit order and processes it, potentially closing the trade.
         """
         if self._try_close_open_order(order, trade, current_time, row):
+            self._apply_phase1_exit_fill(trade, order.ft_price, current_time)
             sub_trade = order.safe_amount_after_fee != trade.amount
             if sub_trade:
                 trade.recalc_trade_from_orders()
@@ -804,6 +808,40 @@ class Backtesting:
                 LocalTrade.close_bt_trade(trade)
             self.wallets.update()
             self.run_protections(pair, current_time, trade.trade_direction)
+
+    @staticmethod
+    def _apply_phase1_exit_fill(
+        trade: LocalTrade,
+        exit_price: float,
+        current_time: datetime,
+    ) -> None:
+        pending_exit_plan = trade.get_custom_data("phase1_pending_exit_plan")
+        sleeves = trade.get_custom_data("phase1_sleeves") or []
+        if not pending_exit_plan or not sleeves:
+            return
+
+        closing_ids = set(pending_exit_plan.get("sleeve_ids", []))
+        updated_sleeves = []
+        closed_sleeves = trade.get_custom_data("phase1_closed_sleeves") or []
+        for sleeve in sleeves:
+            sleeve_copy = dict(sleeve)
+            if sleeve_copy["sleeve_id"] in closing_ids and sleeve_copy["closed_at"] is None:
+                qty = float(sleeve_copy["quantity"])
+                avg_price = float(sleeve_copy["avg_price"])
+                if sleeve_copy["side"] == "long":
+                    realized = (exit_price - avg_price) * qty
+                else:
+                    realized = (avg_price - exit_price) * qty
+                sleeve_copy["realized_pnl"] = float(sleeve_copy.get("realized_pnl", 0.0)) + realized
+                sleeve_copy["quantity"] = 0.0
+                sleeve_copy["closed_at"] = current_time.isoformat()
+                sleeve_copy["updated_at"] = current_time.isoformat()
+                closed_sleeves.append(sleeve_copy)
+            updated_sleeves.append(sleeve_copy)
+
+        trade.set_custom_data("phase1_sleeves", updated_sleeves)
+        trade.set_custom_data("phase1_closed_sleeves", closed_sleeves)
+        trade.set_custom_data("phase1_pending_exit_plan", None)
 
     def _get_exit_for_signal(
         self,
@@ -940,6 +978,11 @@ class Backtesting:
             trade = self._check_adjust_trade_for_candle(trade, row, current_time)
 
         if trade.is_open:
+            phase1_exit_trade = self._check_phase1_sleeve_exit(
+                trade, row, current_time
+            )
+            if phase1_exit_trade:
+                return phase1_exit_trade
             enter = row[SHORT_IDX] if trade.is_short else row[LONG_IDX]
             exit_sig = row[ESHORT_IDX] if trade.is_short else row[ELONG_IDX]
             exits = self.strategy.should_exit(
@@ -956,6 +999,69 @@ class Backtesting:
                 if t:
                     return t
         return None
+
+    def _check_phase1_sleeve_exit(
+        self, trade: LocalTrade, row: tuple, current_time: datetime
+    ) -> LocalTrade | None:
+        exit_payload = (
+            row[PHASE1_NETTING_EXIT_INTENTS_IDX]
+            if len(row) >= PHASE1_NETTING_EXIT_INTENTS_IDX + 1
+            else None
+        )
+        exit_plan = self._build_phase1_net_exit_plan(trade, exit_payload)
+        if not exit_plan:
+            return None
+        trade.set_custom_data("phase1_pending_exit_plan", exit_plan)
+        trade.exit_reason = exit_plan["exit_reason"]
+        return self._exit_trade(
+            trade,
+            row,
+            row[OPEN_IDX],
+            exit_plan["exit_amount"],
+            exit_plan["exit_reason"],
+        )
+
+    @staticmethod
+    def _build_phase1_net_exit_plan(
+        trade: LocalTrade,
+        phase1_netting_exit_intents: str | None,
+    ) -> dict | None:
+        if not phase1_netting_exit_intents:
+            return None
+        sleeves = trade.get_custom_data("phase1_sleeves") or []
+        if not sleeves:
+            return None
+        exit_intents = json.loads(phase1_netting_exit_intents)
+        if not exit_intents:
+            return None
+        side = "short" if trade.is_short else "long"
+        strategy_names = {
+            intent["strategy_name"]
+            for intent in exit_intents
+            if intent.get("side") == side and intent.get("action") == "close"
+        }
+        if not strategy_names:
+            return None
+
+        sleeves_to_close = [
+            sleeve
+            for sleeve in sleeves
+            if sleeve["strategy_name"] in strategy_names
+            and sleeve["side"] == side
+            and sleeve["closed_at"] is None
+            and float(sleeve["quantity"]) > 0
+        ]
+        if not sleeves_to_close:
+            return None
+        exit_amount = sum(float(sleeve["quantity"]) for sleeve in sleeves_to_close)
+        if exit_amount <= 0:
+            return None
+        return {
+            "strategy_names": sorted(strategy_names),
+            "sleeve_ids": [sleeve["sleeve_id"] for sleeve in sleeves_to_close],
+            "exit_amount": exit_amount,
+            "exit_reason": f"phase1_sleeve_exit:{','.join(sorted(strategy_names))}",
+        }
 
     def _run_funding_fees(self, trade: LocalTrade, current_time: datetime, force: bool = False):
         """
@@ -1095,6 +1201,11 @@ class Backtesting:
             if len(row) >= PHASE1_NETTING_INTENTS_IDX + 1
             else None
         )
+        phase1_netting_exit_intents = (
+            row[PHASE1_NETTING_EXIT_INTENTS_IDX]
+            if len(row) >= PHASE1_NETTING_EXIT_INTENTS_IDX + 1
+            else None
+        )
         phase1_plan = self._build_phase1_net_entry_plan(
             phase1_netting_intents,
             direction,
@@ -1206,6 +1317,8 @@ class Backtesting:
                     trade,
                     phase1_netting_intents,
                     phase1_plan,
+                    amount,
+                    phase1_netting_exit_intents,
                     current_time,
                 )
             elif self.handle_similar_order(
@@ -1250,6 +1363,8 @@ class Backtesting:
         trade: LocalTrade,
         phase1_netting_intents: str | None,
         phase1_plan: dict | None,
+        aggregate_amount: float,
+        phase1_netting_exit_intents: str | None,
         current_time: datetime,
     ) -> None:
         """Attach experimental contributor intent payload to backtest trades."""
@@ -1258,16 +1373,42 @@ class Backtesting:
         if phase1_netting_intents:
             trade.set_custom_data("phase1_netting_intents", phase1_netting_intents)
         if phase1_plan:
+            phase1_plan = Backtesting._materialize_phase1_sleeve_amounts(
+                phase1_plan, aggregate_amount
+            )
             trade.set_custom_data("phase1_net_plan", phase1_plan)
             trade.set_custom_data("phase1_sleeves", phase1_plan.get("sleeves", []))
             trade.set_custom_data(
                 "phase1_net_quantity_delta",
                 phase1_plan.get("net_quantity_delta"),
             )
+        if phase1_netting_exit_intents:
+            trade.set_custom_data(
+                "phase1_last_seen_exit_intents",
+                phase1_netting_exit_intents,
+            )
         trade.set_custom_data(
             "phase1_netting_initialized_at",
             current_time.isoformat(),
         )
+
+    @staticmethod
+    def _materialize_phase1_sleeve_amounts(
+        phase1_plan: dict,
+        aggregate_amount: float,
+    ) -> dict:
+        """Translate contributor units into actual trade amounts."""
+        net_quantity_delta = float(phase1_plan["net_quantity_delta"])
+        updated = dict(phase1_plan)
+        sleeves = []
+        for sleeve in phase1_plan["sleeves"]:
+            sleeve_copy = dict(sleeve)
+            unit_quantity = float(sleeve_copy["quantity"])
+            sleeve_copy["quantity_units"] = unit_quantity
+            sleeve_copy["quantity"] = aggregate_amount * unit_quantity / net_quantity_delta
+            sleeves.append(sleeve_copy)
+        updated["sleeves"] = sleeves
+        return updated
 
     @staticmethod
     def _build_phase1_net_entry_plan(
@@ -1630,6 +1771,7 @@ class Backtesting:
         detail_data.loc[:, "enter_tag"] = row[ENTER_TAG_IDX]
         detail_data.loc[:, "exit_tag"] = row[EXIT_TAG_IDX]
         detail_data.loc[:, "phase1_netting_intents"] = row[PHASE1_NETTING_INTENTS_IDX]
+        detail_data.loc[:, "phase1_netting_exit_intents"] = row[PHASE1_NETTING_EXIT_INTENTS_IDX]
         return detail_data[HEADERS].values.tolist()
 
     def _time_generator(self, start_date: datetime, end_date: datetime):

@@ -672,6 +672,7 @@ class LocalTrade:
         phase1_net_plan = self.get_custom_data("phase1_net_plan")
         phase1_sleeves = self.get_custom_data("phase1_sleeves")
         phase1_net_quantity_delta = self.get_custom_data("phase1_net_quantity_delta")
+        phase1_closed_sleeves = self.get_custom_data("phase1_closed_sleeves")
 
         result = {
             "trade_id": self.id,
@@ -773,6 +774,8 @@ class LocalTrade:
             result["phase1_sleeves"] = phase1_sleeves
         if phase1_net_quantity_delta is not None:
             result["phase1_net_quantity_delta"] = phase1_net_quantity_delta
+        if phase1_closed_sleeves is not None:
+            result["phase1_closed_sleeves"] = phase1_closed_sleeves
         return result
 
     @staticmethod
