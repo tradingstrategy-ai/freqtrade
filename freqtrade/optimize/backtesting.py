@@ -10,6 +10,7 @@ from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import Any
 
 from numpy import isnan, nan
 from pandas import DataFrame, Series
@@ -1601,7 +1602,18 @@ class Backtesting:
         # replace proposed rate if another rate was requested
         propose_rate = requested_rate if requested_rate else propose_rate
         stake_amount = requested_stake if requested_stake else stake_amount
-        if trade is None and phase1_plan and phase1_plan["net_quantity_delta"] > 0:
+        if (
+            trade is None
+            and phase1_plan
+            and phase1_plan["net_quantity_delta"] > 0
+            and Backtesting._phase1_should_scale_entry_stake(
+                self.strategy,
+                pair,
+                current_time,
+                entry_tag,
+                direction,
+            )
+        ):
             stake_amount = stake_amount * phase1_plan["net_quantity_delta"]
 
         if not stake_amount:
@@ -1722,6 +1734,26 @@ class Backtesting:
             trade.recalc_trade_from_orders()
 
         return trade
+
+    @staticmethod
+    def _phase1_should_scale_entry_stake(
+        strategy: Any,
+        pair: str,
+        current_time: datetime,
+        entry_tag: str | None,
+        side: str,
+    ) -> bool:
+        checker = getattr(strategy, "phase1_entry_stake_is_aggregate", None)
+        if not callable(checker):
+            return True
+        return not bool(
+            strategy_safe_wrapper(checker, default_retval=False)(
+                pair=pair,
+                current_time=current_time,
+                entry_tag=entry_tag,
+                side=side,
+            )
+        )
 
     @staticmethod
     def _attach_phase1_trade_metadata(
