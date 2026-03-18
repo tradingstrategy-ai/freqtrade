@@ -1277,6 +1277,13 @@ class Backtesting:
                     if sleeve_open_rate
                     else 0.0
                 )
+            def _get_custom_data(key: str, default=None):
+                value = trade.get_custom_data(key)
+                return default if value is None else value
+
+            def _set_custom_data(key: str, value):
+                trade.set_custom_data(key, value)
+
             sleeve_trade = SimpleNamespace(
                 pair=trade.pair,
                 open_date_utc=datetime.fromisoformat(sleeve["opened_at"]),
@@ -1285,6 +1292,10 @@ class Backtesting:
                 is_short=sleeve.get("side") == "short",
                 amount=float(sleeve.get("quantity", 0.0)),
                 stake_amount=float(sleeve.get("quantity", 0.0)) * sleeve_open_rate,
+                leverage=trade.leverage,
+                nr_of_successful_entries=trade.nr_of_successful_entries,
+                get_custom_data=_get_custom_data,
+                set_custom_data=_set_custom_data,
             )
             result = strategy_safe_wrapper(sub_strategy.custom_exit, default_retval=None)(
                 pair=trade.pair,
