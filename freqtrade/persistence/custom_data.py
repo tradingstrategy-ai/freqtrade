@@ -100,7 +100,15 @@ class CustomDataWrapper:
             elif data.cd_type == "float":
                 data.value = float(data.cd_value)
         else:
-            data.value = json.loads(data.cd_value)
+            try:
+                data.value = json.loads(data.cd_value)
+            except json.JSONDecodeError:
+                logger.warning(
+                    "Could not decode custom_data key=%s for trade_id=%s; treating as None.",
+                    data.cd_key,
+                    data.ft_trade_id,
+                )
+                data.value = None
         return data
 
     @staticmethod
@@ -161,6 +169,7 @@ class CustomDataWrapper:
         custom_data = CustomDataWrapper.get_custom_data(trade_id=trade_id, key=key)
         if custom_data:
             data_entry = custom_data[0]
+            data_entry.cd_type = value_type
             data_entry.cd_value = value_db
             data_entry.updated_at = dt_now()
         else:
