@@ -915,6 +915,85 @@ class Backtesting:
         trade.open_date = opened_at
 
     @staticmethod
+    def _apply_phase1_entry_adjustment_metadata(
+        trade: LocalTrade,
+        strategy_name: str,
+        side: str,
+        added_quantity: float,
+        fill_price: float,
+        current_time: datetime,
+    ) -> None:
+        """Attribute a filled position adjustment back to a contributor sleeve."""
+        if added_quantity <= 0.0:
+            return
+
+        sleeves = trade.get_custom_data("phase1_sleeves") or []
+        if not sleeves:
+            return
+
+        updated_sleeves: list[dict] = []
+        matched = False
+        for sleeve in sleeves:
+            sleeve_copy = dict(sleeve)
+            if (
+                not matched
+                and sleeve_copy.get("strategy_name") == strategy_name
+                and sleeve_copy.get("side") == side
+                and sleeve_copy.get("closed_at") is None
+                and float(sleeve_copy.get("quantity", 0.0)) > 0.0
+            ):
+                old_qty = float(sleeve_copy.get("quantity", 0.0))
+                old_units = float(sleeve_copy.get("quantity_units", old_qty))
+                total_qty = old_qty + added_quantity
+                old_avg = float(sleeve_copy.get("avg_price", fill_price))
+                added_units = (
+                    (added_quantity * old_units / old_qty)
+                    if old_qty > 0.0 and old_units > 0.0
+                    else added_quantity
+                )
+                sleeve_copy["quantity"] = total_qty
+                sleeve_copy["quantity_units"] = old_units + added_units
+                sleeve_copy["avg_price"] = (
+                    ((old_qty * old_avg) + (added_quantity * fill_price)) / total_qty
+                )
+                sleeve_copy["updated_at"] = current_time.isoformat()
+                matched = True
+            updated_sleeves.append(sleeve_copy)
+
+        if not matched:
+            updated_sleeves.append(
+                {
+                    "sleeve_id": f"{trade.pair}|{strategy_name}|{side}|{current_time.isoformat()}",
+                    "strategy_name": strategy_name,
+                    "pair": trade.pair,
+                    "side": side,
+                    "quantity": added_quantity,
+                    "quantity_units": added_quantity,
+                    "avg_price": fill_price,
+                    "opened_at": current_time.isoformat(),
+                    "updated_at": current_time.isoformat(),
+                    "realized_pnl": 0.0,
+                    "closed_at": None,
+                }
+            )
+
+        trade.set_custom_data("phase1_sleeves", updated_sleeves)
+
+        phase1_plan = trade.get_custom_data("phase1_net_plan")
+        if isinstance(phase1_plan, dict):
+            updated_plan = dict(phase1_plan)
+            updated_plan["sleeves"] = updated_sleeves
+            updated_plan["strategy_names"] = sorted(
+                {
+                    str(sleeve["strategy_name"])
+                    for sleeve in updated_sleeves
+                    if sleeve.get("closed_at") is None and float(sleeve.get("quantity", 0.0)) > 0.0
+                }
+            )
+            updated_plan["contributor_count"] = len(updated_plan["strategy_names"])
+            trade.set_custom_data("phase1_net_plan", updated_plan)
+
+    @staticmethod
     def _phase1_is_full_trade_exit(order: Order, trade: LocalTrade) -> bool:
         return abs(float(order.safe_amount_after_fee) - float(trade.amount)) <= 1e-12
 
@@ -1732,6 +1811,22 @@ class Backtesting:
             trade.orders.append(order)
             self._try_close_open_order(order, trade, current_time, row)
             trade.recalc_trade_from_orders()
+            if (
+                pos_adjust
+                and phase1_plan is None
+                and entry_tag
+                and order.safe_filled > 0.0
+            ):
+                strategy_name = entry_tag.split("|", 1)[0]
+                if strategy_name:
+                    Backtesting._apply_phase1_entry_adjustment_metadata(
+                        trade=trade,
+                        strategy_name=strategy_name,
+                        side="short" if trade.is_short else "long",
+                        added_quantity=order.safe_filled,
+                        fill_price=order.safe_price,
+                        current_time=current_time,
+                    )
 
         return trade
 
