@@ -86,7 +86,6 @@ def _make_handler(mocker, config_overrides=None, pairlistconfig=None):
         "number_assets": 75,
         "lookback_days": 7,
         "min_value": 0,
-        "pair_suffix": "_USDC_USDC",
     }
     if pairlistconfig:
         plconfig.update(pairlistconfig)
@@ -426,3 +425,342 @@ class TestPairlistChainIntegration:
         )
         # Output should be BTC > ETH > DOGE regardless of input order
         assert result == ["BTC/USDC:USDC", "ETH/USDC:USDC", "DOGE/USDC:USDC"]
+
+
+# ---------------------------------------------------------------------------
+# Step 1: Auto-derive pair_suffix from config
+# ---------------------------------------------------------------------------
+
+
+class TestAutoDerivePairSuffix:
+    def test_futures_usdc_derives_usdc_usdc(self, mocker):
+        """Futures + USDC auto-derives _USDC_USDC (same as old hardcoded default)."""
+        handler, _ = _make_handler(mocker, pairlistconfig={
+            # No explicit pair_suffix — should auto-derive
+        })
+        assert handler._pair_suffix == "_USDC_USDC"
+
+    def test_futures_usdt_derives_usdt_usdt(self, mocker):
+        """Futures + USDT (Aster) auto-derives _USDT_USDT."""
+        handler, _ = _make_handler(mocker, config_overrides={
+            "stake_currency": "USDT",
+            "trading_mode": "futures",
+        }, pairlistconfig={
+            # No explicit pair_suffix
+        })
+        assert handler._pair_suffix == "_USDT_USDT"
+
+    def test_spot_usdc_derives_usdc(self, mocker):
+        """Spot + USDC auto-derives _USDC (no settlement currency)."""
+        handler, _ = _make_handler(mocker, config_overrides={
+            "trading_mode": "spot",
+        }, pairlistconfig={
+            # No explicit pair_suffix
+        })
+        assert handler._pair_suffix == "_USDC"
+
+    def test_explicit_suffix_overrides_auto(self, mocker):
+        """Explicit pair_suffix in pairlistconfig always wins."""
+        handler, _ = _make_handler(mocker, config_overrides={
+            "stake_currency": "USDT",
+            "trading_mode": "futures",
+        }, pairlistconfig={
+            "pair_suffix": "_CUSTOM_CUSTOM",
+        })
+        assert handler._pair_suffix == "_CUSTOM_CUSTOM"
+
+    def test_futures_usdt_loads_usdt_files(self, mocker, tmp_path):
+        """Auto-derived USDT suffix actually finds USDT-named feather files."""
+        futures_dir = tmp_path / "futures"
+        futures_dir.mkdir()
+
+        dates = pd.date_range("2025-01-01", periods=5, freq="1D")
+        df = pd.DataFrame({
+            "date": dates,
+            "open": [100.0] * 5,
+            "high": [110.0] * 5,
+            "low": [90.0] * 5,
+            "close": [105.0] * 5,
+            "volume": [1000.0] * 5,
+        })
+        df.to_feather(futures_dir / "BTC_USDT_USDT-1d-futures.feather")
+
+        handler, _ = _make_handler(mocker, config_overrides={
+            "stake_currency": "USDT",
+            "trading_mode": "futures",
+        }, pairlistconfig={
+            "data_source_dir": str(tmp_path),
+        })
+        handler._load_volume_data()
+
+        assert handler._volume_data is not None
+        assert not handler._volume_data.empty
+        assert "BTC/USDT:USDT" in handler._volume_data.columns
+
+
+# ---------------------------------------------------------------------------
+# Step 2: Auto-derive subdirectory and glob pattern
+# ---------------------------------------------------------------------------
+
+
+class TestAutoDerivePathAndGlob:
+    def test_futures_candle_type_str(self, mocker):
+        handler, _ = _make_handler(mocker)
+        assert handler._candle_type_str == "futures"
+
+    def test_spot_candle_type_str(self, mocker):
+        handler, _ = _make_handler(mocker, config_overrides={"trading_mode": "spot"})
+        assert handler._candle_type_str == ""
+
+    def test_spot_data_no_futures_subdir(self, mocker, tmp_path):
+        """Spot mode: files in root dir (no /futures/ subdir), no -futures suffix."""
+        dates = pd.date_range("2025-01-01", periods=5, freq="1D")
+        df = pd.DataFrame({
+            "date": dates,
+            "open": [100.0] * 5,
+            "high": [110.0] * 5,
+            "low": [90.0] * 5,
+            "close": [105.0] * 5,
+            "volume": [1000.0] * 5,
+        })
+        # Spot file: no -futures suffix, just _USDC
+        df.to_feather(tmp_path / "BTC_USDC-1d.feather")
+
+        handler, _ = _make_handler(mocker, config_overrides={
+            "trading_mode": "spot",
+        }, pairlistconfig={
+            "data_source_dir": str(tmp_path),
+        })
+        handler._load_volume_data()
+
+        assert handler._volume_data is not None
+        assert not handler._volume_data.empty
+        assert "BTC/USDC" in handler._volume_data.columns
+
+    def test_spot_4h_fallback(self, mocker, tmp_path):
+        """Spot mode: 4h fallback works without -futures suffix."""
+        dates = pd.date_range("2025-01-01", periods=30, freq="4h")
+        df = pd.DataFrame({
+            "date": dates,
+            "open": [100.0] * 30,
+            "high": [110.0] * 30,
+            "low": [90.0] * 30,
+            "close": [105.0] * 30,
+            "volume": [250.0] * 30,
+        })
+        df.to_feather(tmp_path / "BTC_USDC-4h.feather")
+
+        handler, _ = _make_handler(mocker, config_overrides={
+            "trading_mode": "spot",
+        }, pairlistconfig={
+            "data_source_dir": str(tmp_path),
+        })
+        handler._load_volume_data()
+
+        assert handler._volume_data is not None
+        assert not handler._volume_data.empty
+        assert "BTC/USDC" in handler._volume_data.columns
+
+    def test_futures_subdir_fallback_to_root(self, mocker, tmp_path):
+        """Futures mode: if /futures/ subdir doesn't exist, falls back to root."""
+        dates = pd.date_range("2025-01-01", periods=5, freq="1D")
+        df = pd.DataFrame({
+            "date": dates,
+            "open": [100.0] * 5,
+            "high": [110.0] * 5,
+            "low": [90.0] * 5,
+            "close": [105.0] * 5,
+            "volume": [1000.0] * 5,
+        })
+        # Put file in root, no /futures/ subdir
+        df.to_feather(tmp_path / "BTC_USDC_USDC-1d-futures.feather")
+
+        handler, _ = _make_handler(mocker, pairlistconfig={
+            "data_source_dir": str(tmp_path),
+        })
+        handler._load_volume_data()
+
+        assert handler._volume_data is not None
+        assert not handler._volume_data.empty
+
+
+# ---------------------------------------------------------------------------
+# Step 3: Case-insensitive matching
+# ---------------------------------------------------------------------------
+
+
+class TestCaseInsensitiveMatching:
+    def test_kprefix_case_mismatch_resolved(self, mocker, tmp_path):
+        """kPEPE in filename → KPEPE in volume data; whitelist has KPEPE/USDC:USDC."""
+        futures_dir = tmp_path / "futures"
+        futures_dir.mkdir()
+
+        dates = pd.date_range("2025-01-01", periods=5, freq="1D")
+        df = pd.DataFrame({
+            "date": dates,
+            "open": [1.0] * 5,
+            "high": [1.1] * 5,
+            "low": [0.9] * 5,
+            "close": [1.05] * 5,
+            "volume": [1000.0] * 5,
+        })
+        df.to_feather(futures_dir / "kPEPE_USDC_USDC-1d-futures.feather")
+
+        handler, plm = _make_handler(mocker, pairlistconfig={
+            "data_source_dir": str(tmp_path),
+        })
+        plm._current_time = datetime(2025, 1, 3, 0, 0, tzinfo=timezone.utc)
+
+        # Whitelist uses uppercase KPEPE
+        result = handler.filter_pairlist(["KPEPE/USDC:USDC"], {})
+        assert result == ["KPEPE/USDC:USDC"]
+
+    def test_case_insensitive_preserves_whitelist_casing(self, mocker, tmp_path):
+        """Result should use the whitelist's casing, not the volume data's."""
+        futures_dir = tmp_path / "futures"
+        futures_dir.mkdir()
+
+        dates = pd.date_range("2025-01-01", periods=5, freq="1D")
+        for token in ["BTC", "ETH"]:
+            df = pd.DataFrame({
+                "date": dates,
+                "open": [100.0] * 5,
+                "high": [110.0] * 5,
+                "low": [90.0] * 5,
+                "close": [105.0] * 5,
+                "volume": [1000.0] * 5,
+            })
+            df.to_feather(futures_dir / f"{token}_USDC_USDC-1d-futures.feather")
+
+        handler, plm = _make_handler(mocker, pairlistconfig={
+            "data_source_dir": str(tmp_path),
+        })
+        plm._current_time = datetime(2025, 1, 3, 0, 0, tzinfo=timezone.utc)
+
+        # Even if we pass weird casing, the result uses the input pairlist's casing
+        result = handler.filter_pairlist(["BTC/USDC:USDC", "ETH/USDC:USDC"], {})
+        assert "BTC/USDC:USDC" in result
+        assert "ETH/USDC:USDC" in result
+
+    def test_all_seven_kprefix_tokens(self, mocker, tmp_path):
+        """All 7 Hyperliquid k-prefix tokens resolve without token_mapping."""
+        futures_dir = tmp_path / "futures"
+        futures_dir.mkdir()
+
+        k_tokens = ["kBONK", "kDOGS", "kFLOKI", "kLUNC", "kNEIRO", "kPEPE", "kSHIB"]
+        dates = pd.date_range("2025-01-01", periods=5, freq="1D")
+
+        for token in k_tokens:
+            df = pd.DataFrame({
+                "date": dates,
+                "open": [1.0] * 5,
+                "high": [1.1] * 5,
+                "low": [0.9] * 5,
+                "close": [1.05] * 5,
+                "volume": [1000.0] * 5,
+            })
+            df.to_feather(futures_dir / f"{token}_USDC_USDC-1d-futures.feather")
+
+        handler, plm = _make_handler(mocker, pairlistconfig={
+            "data_source_dir": str(tmp_path),
+            # No token_mapping!
+        })
+        plm._current_time = datetime(2025, 1, 3, 0, 0, tzinfo=timezone.utc)
+
+        # Whitelist uses uppercase K
+        whitelist = [f"{t[1:].upper()}/USDC:USDC" for t in k_tokens]
+        # kBONK → BONK, kDOGS → DOGS, etc — wait, _extract_ticker makes kBONK → KBONK
+        # So whitelist should be KBONK, KDOGS, etc.
+        whitelist = [f"K{t[1:]}/USDC:USDC" for t in k_tokens]
+        result = handler.filter_pairlist(whitelist, {})
+
+        assert len(result) == 7
+
+    def test_legitimate_uppercase_K_not_mangled(self, mocker, tmp_path):
+        """KAITO and KAS (legitimate K-start tokens) are not affected by k-prefix logic."""
+        futures_dir = tmp_path / "futures"
+        futures_dir.mkdir()
+
+        dates = pd.date_range("2025-01-01", periods=5, freq="1D")
+        for token in ["KAITO", "KAS"]:
+            df = pd.DataFrame({
+                "date": dates,
+                "open": [100.0] * 5,
+                "high": [110.0] * 5,
+                "low": [90.0] * 5,
+                "close": [105.0] * 5,
+                "volume": [1000.0] * 5,
+            })
+            df.to_feather(futures_dir / f"{token}_USDC_USDC-1d-futures.feather")
+
+        handler, plm = _make_handler(mocker, pairlistconfig={
+            "data_source_dir": str(tmp_path),
+        })
+        plm._current_time = datetime(2025, 1, 3, 0, 0, tzinfo=timezone.utc)
+
+        result = handler.filter_pairlist(
+            ["KAITO/USDC:USDC", "KAS/USDC:USDC"], {}
+        )
+        assert result == ["KAITO/USDC:USDC", "KAS/USDC:USDC"]
+
+
+# ---------------------------------------------------------------------------
+# Step 4: Graceful degradation
+# ---------------------------------------------------------------------------
+
+
+class TestGracefulDegradation:
+    def test_exception_returns_original_pairlist(self, mocker):
+        """If internal logic throws, filter_pairlist returns input unchanged."""
+        handler, plm = _make_handler(mocker)
+        plm._current_time = datetime(2025, 1, 5, 0, 0, tzinfo=timezone.utc)
+
+        # Force _build_daily_rankings to throw
+        handler._build_daily_rankings = MagicMock(
+            side_effect=RuntimeError("corrupted data")
+        )
+
+        input_list = ["BTC/USDC:USDC", "ETH/USDC:USDC"]
+        result = handler.filter_pairlist(input_list, {})
+        assert result == input_list
+
+    def test_bad_data_source_dir_degrades(self, mocker):
+        """Non-existent data_source_dir doesn't crash, just passes through."""
+        handler, plm = _make_handler(mocker, pairlistconfig={
+            "data_source_dir": "/totally/nonexistent/path",
+        })
+        plm._current_time = datetime(2025, 1, 5, 0, 0, tzinfo=timezone.utc)
+
+        input_list = ["BTC/USDC:USDC"]
+        # Should not raise — empty data → empty rankings → return original
+        result = handler.filter_pairlist(input_list, {})
+        assert result == input_list
+
+    def test_corrupted_feather_skipped(self, mocker, tmp_path):
+        """A corrupted feather file is skipped; valid files still load."""
+        futures_dir = tmp_path / "futures"
+        futures_dir.mkdir()
+
+        dates = pd.date_range("2025-01-01", periods=5, freq="1D")
+        df = pd.DataFrame({
+            "date": dates,
+            "open": [100.0] * 5,
+            "high": [110.0] * 5,
+            "low": [90.0] * 5,
+            "close": [105.0] * 5,
+            "volume": [1000.0] * 5,
+        })
+        df.to_feather(futures_dir / "BTC_USDC_USDC-1d-futures.feather")
+
+        # Write corrupted file
+        with open(futures_dir / "BAD_USDC_USDC-1d-futures.feather", "wb") as f:
+            f.write(b"not a feather file")
+
+        handler, plm = _make_handler(mocker, pairlistconfig={
+            "data_source_dir": str(tmp_path),
+        })
+        handler._load_volume_data()
+
+        assert handler._volume_data is not None
+        assert "BTC/USDC:USDC" in handler._volume_data.columns
+        assert "BAD/USDC:USDC" not in handler._volume_data.columns

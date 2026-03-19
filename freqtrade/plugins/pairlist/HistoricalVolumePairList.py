@@ -14,12 +14,13 @@ Usage in config (as a filter after StaticPairList):
             "data_source_dir": "user_data/data/hyperliquid",
             "number_assets": 75,
             "lookback_days": 7,
-            "min_value": 100000,
-            "pair_suffix": "_USDC_USDC",
-            "token_mapping": {"kPEPE": "KPEPE"}
+            "min_value": 100000
         }
     ],
     "enable_dynamic_pairlist": true
+
+pair_suffix, subdirectory, and glob patterns are auto-derived from stake_currency
+and trading_mode. Override pair_suffix explicitly only if needed.
 """
 
 import logging
@@ -59,11 +60,21 @@ class HistoricalVolumePairList(IPairList):
         self._number_assets: int = self._pairlistconfig.get("number_assets", 75)
         self._lookback_days: int = self._pairlistconfig.get("lookback_days", 7)
         self._min_value: float = self._pairlistconfig.get("min_value", 0)
-        self._pair_suffix: str = self._pairlistconfig.get("pair_suffix", "_USDC_USDC")
         self._token_mapping: dict[str, str] = self._pairlistconfig.get("token_mapping", {})
 
-        # Derive quote currency from config
+        # Derive quote currency and trading mode from config
         self._stake_currency: str = self._config.get("stake_currency", "USDC")
+        trading_mode = self._config.get("trading_mode", "spot")
+
+        # Auto-derive pair_suffix from stake_currency + trading_mode when not explicitly set
+        if trading_mode == "futures":
+            default_suffix = f"_{self._stake_currency}_{self._stake_currency}"
+        else:
+            default_suffix = f"_{self._stake_currency}"
+        self._pair_suffix: str = self._pairlistconfig.get("pair_suffix", default_suffix)
+
+        # Auto-derive candle type string for file paths
+        self._candle_type_str: str = "futures" if trading_mode == "futures" else ""
 
         # Lazy-loaded data
         self._volume_data: pd.DataFrame | None = None
@@ -113,9 +124,9 @@ class HistoricalVolumePairList(IPairList):
             },
             "pair_suffix": {
                 "type": "string",
-                "default": "_USDC_USDC",
-                "description": "Source file pair suffix",
-                "help": "File naming suffix (e.g. '_USDC_USDC' or '_USDT_USDT').",
+                "default": "",
+                "description": "Source file pair suffix (auto-derived if empty)",
+                "help": "File naming suffix. Auto-derived from stake_currency + trading_mode if not set.",
             },
             "token_mapping": {
                 "type": "object",
@@ -164,19 +175,31 @@ class HistoricalVolumePairList(IPairList):
         if self._volume_data is not None:
             return
 
-        data_dir = Path(self._data_source_dir) / "futures"
-        if not data_dir.exists():
-            # Try without /futures subdirectory
+        if self._candle_type_str:
+            data_dir = Path(self._data_source_dir) / self._candle_type_str
+            if not data_dir.exists():
+                data_dir = Path(self._data_source_dir)
+        else:
             data_dir = Path(self._data_source_dir)
 
         # Prefer 1d candles, fall back to 4h
-        glob_pattern = f"*{self._pair_suffix}-1d-futures.feather"
-        files = list(data_dir.glob(glob_pattern))
+        # Skip symlinks to avoid double-counting aliased tickers
+        # (e.g. NVDA -> XYZ-NVDA symlinks in Hyperliquid data)
+        # Skip XYZ-* files (stock/commodity wrappers) to keep rankings crypto-only
+        candle_suffix = f"-{self._candle_type_str}" if self._candle_type_str else ""
+        glob_pattern = f"*{self._pair_suffix}-1d{candle_suffix}.feather"
+        files = [
+            f for f in data_dir.glob(glob_pattern)
+            if not f.is_symlink() and not f.name.startswith("XYZ-")
+        ]
         resample_from_subdaily = False
 
         if not files:
-            glob_pattern = f"*{self._pair_suffix}-4h-futures.feather"
-            files = list(data_dir.glob(glob_pattern))
+            glob_pattern = f"*{self._pair_suffix}-4h{candle_suffix}.feather"
+            files = [
+                f for f in data_dir.glob(glob_pattern)
+                if not f.is_symlink() and not f.name.startswith("XYZ-")
+            ]
             resample_from_subdaily = True
             if files:
                 logger.info(
@@ -186,7 +209,7 @@ class HistoricalVolumePairList(IPairList):
         if not files:
             logger.warning(
                 f"HistoricalVolumePairList: no feather files found in {data_dir} "
-                f"matching *{self._pair_suffix}-*-futures.feather"
+                f"matching *{self._pair_suffix}-*{candle_suffix}.feather"
             )
             self._volume_data = pd.DataFrame()
             return
@@ -293,6 +316,16 @@ class HistoricalVolumePairList(IPairList):
         Receives the trading universe, looks up volume for each pair,
         and returns the top N sorted by volume (highest first).
         """
+        try:
+            return self._filter_pairlist_inner(pairlist)
+        except Exception as e:
+            logger.warning(
+                f"HistoricalVolumePairList: error filtering, passing through: {e}"
+            )
+            return pairlist
+
+    def _filter_pairlist_inner(self, pairlist: list[str]) -> list[str]:
+        """Inner filtering logic, separated for graceful error handling."""
         self._build_daily_rankings()
 
         # Get current backtest time from pairlist manager
@@ -312,9 +345,15 @@ class HistoricalVolumePairList(IPairList):
             else:
                 return pairlist
 
-        # Intersection: keep only pairs in the incoming pairlist, in volume sort order
-        pairset = set(pairlist)
-        result = [p for p in ranked_pairs if p in pairset]
+        # Intersection: keep only pairs in the incoming pairlist, in volume sort order.
+        # Case-insensitive matching handles k-prefix tokens (kPEPE vs KPEPE) and
+        # other casing mismatches between filenames and whitelist.
+        pairset_lower = {p.lower(): p for p in pairlist}
+        result = [
+            pairset_lower[rp.lower()]
+            for rp in ranked_pairs
+            if rp.lower() in pairset_lower
+        ]
 
         logger.info(
             f"HistoricalVolumePairList [{day_str}]: "
