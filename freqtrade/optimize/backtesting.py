@@ -133,6 +133,7 @@ class Backtesting:
 
         self.config["dry_run"] = True
         self.price_pair_prec: dict[str, Series] = {}
+        self.available_pairs: list[str] = []
         self.run_ids: dict[str, str] = {}
         self.strategylist: list[IStrategy] = []
         self.all_bt_content: dict[str, BacktestContentType] = {}
@@ -183,7 +184,8 @@ class Backtesting:
         self._validate_pairlists_for_backtesting()
 
         self.dataprovider.add_pairlisthandler(self.pairlists)
-        self.pairlists.refresh_pairlist()
+        self.dynamic_pairlist: bool = self.config.get("enable_dynamic_pairlist", False)
+        self.pairlists.refresh_pairlist(only_first=self.dynamic_pairlist)
 
         if len(self.pairlists.whitelist) == 0:
             raise OperationalException("No pair in whitelist.")
@@ -218,7 +220,6 @@ class Backtesting:
         self._can_short = self.trading_mode != TradingMode.SPOT
         self._position_stacking: bool = self.config.get("position_stacking", False)
         self.enable_protections: bool = self.config.get("enable_protections", False)
-        self.dynamic_pairlist: bool = self.config.get("enable_dynamic_pairlist", False)
         migrate_data(config, self.exchange)
 
         self.init_backtest()
@@ -342,10 +343,12 @@ class Backtesting:
         self.progress.set_new_value(1)
         self._load_bt_data_detail()
         self.price_pair_prec = {}
+        self.available_pairs = []
         for pair in self.pairlists.whitelist:
             if pair in data:
                 # Load price precision logic
                 self.price_pair_prec[pair] = get_tick_size_over_time(data[pair])
+                self.available_pairs.append(pair)
         return data, self.timerange
 
     def _load_bt_data_detail(self) -> None:
@@ -2326,14 +2329,20 @@ class Backtesting:
         )
         # Indexes per pair, so some pairs are allowed to have a missing start.
         indexes: dict = defaultdict(int)
+        _last_pairlist_date = None
 
         for current_time in self._time_generator(start_date, end_date):
             # Loop for each main candle.
             self.check_abort()
 
             if self.dynamic_pairlist and self.pairlists:
-                self.pairlists.refresh_pairlist()
-                pairs = self.pairlists.whitelist
+                _current_date = current_time.date()
+                if _current_date != _last_pairlist_date:
+                    self.pairlists.refresh_pairlist(
+                        pairs=self.available_pairs, current_time=current_time
+                    )
+                    pairs = self.pairlists.whitelist
+                    _last_pairlist_date = _current_date
 
             # Reset open trade count for this candle
             # Critical to avoid exceeding max_open_trades in backtesting
