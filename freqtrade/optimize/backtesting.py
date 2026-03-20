@@ -2311,6 +2311,48 @@ class Backtesting:
             for pair in new_pairlist:
                 yield current_time_det, is_first, has_detail, idx, pair
 
+    def _rank_pairs_for_candle(
+        self,
+        data: dict[str, list[tuple]],
+        pairs: list[str],
+        indexes: dict,
+        current_time: datetime,
+    ) -> list[str]:
+        """Pre-scan pairs for entry signals and return pairs in ranked order.
+
+        Peeks at each pair's current row (without advancing indexes) to detect
+        entry signals. Calls ``strategy.rank_entry_pairs()`` to reorder entry
+        candidates. Non-entry pairs retain their original order.
+
+        When ``rank_entry_pairs()`` returns the default (unchanged), the result
+        is identical to the input order — preserving deterministic behavior.
+        """
+        entry_candidates: list[tuple[str, str, str]] = []
+        for pair in pairs:
+            row_index = indexes.get(pair, 0)
+            try:
+                row = data[pair][row_index]
+            except (IndexError, KeyError):
+                continue
+            if row[DATE_IDX] > current_time:
+                continue
+            trade_dir = self.check_for_trade_entry(row)
+            if trade_dir is not None:
+                enter_tag = row[ENTER_TAG_IDX] if len(row) >= ENTER_TAG_IDX + 1 else ""
+                entry_candidates.append((pair, trade_dir, enter_tag or ""))
+
+        if not entry_candidates:
+            return pairs
+
+        ranked = self.strategy.rank_entry_pairs(entry_candidates, current_time)
+        ranked_pairs = [p for p, _, _ in ranked]
+        ranked_set = set(ranked_pairs)
+
+        # Preserve order of non-entry pairs, append ranked entry pairs.
+        # _time_pair_generator_det will prepend open-trade pairs regardless.
+        non_entry = [p for p in pairs if p not in ranked_set]
+        return non_entry + ranked_pairs
+
     def time_pair_generator(
         self,
         start_date: datetime,
@@ -2354,8 +2396,13 @@ class Backtesting:
             pair_tradedir_cache: dict[str, LongShort | None] = {}
             pairs_with_open_trades = [t.pair for t in LocalTrade.bt_trades_open]
 
+            # Pre-scan pairs for entry signals and rank them.
+            # This reorders pairs so higher-ranked entries get trade slots first
+            # when slots are limited (rank_entry_pairs hook).
+            ranked_pairs = self._rank_pairs_for_candle(data, pairs, indexes, current_time)
+
             for current_time_det, is_first, has_detail, idx, pair in self._time_pair_generator_det(
-                current_time, pairs
+                current_time, ranked_pairs
             ):
                 # Loop for each detail candle (if necessary) and pair
                 # Yields only the main date if no detail timeframe is set.
