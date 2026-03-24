@@ -16,7 +16,6 @@ from freqtrade.loggers.sensitive_filter import (
     SensitiveDataFilter,
     contains_secret,
     is_logging_patched,
-    is_notebook_patched,
     patch_logging,
     patch_notebook,
     sanitize_text,

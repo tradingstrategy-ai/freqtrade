@@ -11,7 +11,7 @@ from freqtrade.exceptions import OperationalException
 from freqtrade.loggers.buffering_handler import FTBufferingHandler
 from freqtrade.loggers.ft_rich_handler import FtRichHandler
 from freqtrade.loggers.rich_console import get_rich_console
-from freqtrade.loggers.sensitive_filter import SensitiveDataFilter, patch_logging
+from freqtrade.loggers.sensitive_filter import patch_logging
 
 
 # from freqtrade.loggers.std_err_stream_handler import FTStdErrStreamHandler

@@ -161,7 +161,7 @@ def sanitize_mime_bundle(data: dict[str, Any]) -> dict[str, Any]:
     Only string values are filtered; binary payloads (images) are left alone.
     """
     compiled = _get_default_compiled_patterns()
-    result = {}
+    result: dict[str, Any] = {}
     for mime_type, value in data.items():
         if isinstance(value, str):
             result[mime_type] = sanitize_text(value, compiled)
@@ -187,7 +187,7 @@ _ORIGINAL_PUBLISH_DISPLAY_DATA = None
 _ORIGINAL_SHOWTRACEBACK = None
 
 
-def patch_notebook() -> None:
+def patch_notebook() -> None:  # noqa: C901
     """Extend sensitive data filtering to all Jupyter/IPython output channels.
 
     Patches:
@@ -230,8 +230,8 @@ def patch_notebook() -> None:
             text = sanitize_text(text, compiled)
         return _ORIGINAL_STDERR_WRITE(text)
 
-    sys.stdout.write = _sanitized_stdout_write  # type: ignore[method-assign]
-    sys.stderr.write = _sanitized_stderr_write  # type: ignore[method-assign]
+    sys.stdout.write = _sanitized_stdout_write
+    sys.stderr.write = _sanitized_stderr_write
 
     # --- Channel 2: DisplayHook (last-expression auto-display) ---
     if hasattr(ipython, "displayhook") and hasattr(ipython.displayhook, "write_format_data"):
@@ -241,7 +241,7 @@ def patch_notebook() -> None:
             format_dict = sanitize_mime_bundle(format_dict)
             return _ORIGINAL_WRITE_FORMAT_DATA(format_dict, md_dict)
 
-        ipython.displayhook.write_format_data = _sanitized_write_format_data  # type: ignore[method-assign]
+        ipython.displayhook.write_format_data = _sanitized_write_format_data
 
     # --- Channel 3: publish_display_data (display() calls) ---
     try:
@@ -256,7 +256,7 @@ def patch_notebook() -> None:
                 data, metadata, transient=transient, **kwargs
             )
 
-        _display_mod.publish_display_data = _sanitized_publish_display_data  # type: ignore[method-assign]
+        _display_mod.publish_display_data = _sanitized_publish_display_data
     except (ImportError, AttributeError):
         pass
 
@@ -279,7 +279,7 @@ def patch_notebook() -> None:
             if sanitized:
                 old_stderr.write(sanitized)
 
-        ipython.showtraceback = _sanitized_showtraceback  # type: ignore[method-assign]
+        ipython.showtraceback = _sanitized_showtraceback
 
     _NOTEBOOK_PATCHED = True
 
@@ -295,25 +295,25 @@ def unpatch_notebook() -> None:
         return
 
     if _ORIGINAL_STDOUT_WRITE is not None:
-        sys.stdout.write = _ORIGINAL_STDOUT_WRITE  # type: ignore[method-assign]
+        sys.stdout.write = _ORIGINAL_STDOUT_WRITE
     if _ORIGINAL_STDERR_WRITE is not None:
-        sys.stderr.write = _ORIGINAL_STDERR_WRITE  # type: ignore[method-assign]
+        sys.stderr.write = _ORIGINAL_STDERR_WRITE
 
     try:
         from IPython import get_ipython
         ipython = get_ipython()
         if ipython is not None:
             if _ORIGINAL_WRITE_FORMAT_DATA is not None:
-                ipython.displayhook.write_format_data = _ORIGINAL_WRITE_FORMAT_DATA  # type: ignore[method-assign]
+                ipython.displayhook.write_format_data = _ORIGINAL_WRITE_FORMAT_DATA
             if _ORIGINAL_SHOWTRACEBACK is not None:
-                ipython.showtraceback = _ORIGINAL_SHOWTRACEBACK  # type: ignore[method-assign]
+                ipython.showtraceback = _ORIGINAL_SHOWTRACEBACK
     except ImportError:
         pass
 
     if _ORIGINAL_PUBLISH_DISPLAY_DATA is not None:
         try:
             import IPython.core.display_functions as _display_mod
-            _display_mod.publish_display_data = _ORIGINAL_PUBLISH_DISPLAY_DATA  # type: ignore[method-assign]
+            _display_mod.publish_display_data = _ORIGINAL_PUBLISH_DISPLAY_DATA
         except (ImportError, AttributeError):
             pass
 
@@ -409,7 +409,8 @@ def unpatch_logging() -> None:
 
     # Restore original Formatter.formatException
     if _ORIGINAL_FORMAT_EXCEPTION is not None:
-        logging.Formatter.formatException = _ORIGINAL_FORMAT_EXCEPTION  # type: ignore[method-assign]
+        fmt_cls = logging.Formatter
+        fmt_cls.formatException = _ORIGINAL_FORMAT_EXCEPTION  # type: ignore[method-assign]
 
     # Remove filter from existing handlers
     if _SENSITIVE_FILTER is not None:
