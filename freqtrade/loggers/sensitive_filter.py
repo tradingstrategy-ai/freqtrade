@@ -338,22 +338,28 @@ def is_notebook_patched() -> bool:
 _LOGGING_PATCHED = False
 _SENSITIVE_FILTER: SensitiveDataFilter | None = None
 _ORIGINAL_HANDLER_INIT = None
+_ORIGINAL_RECORD_FACTORY = None
+_ORIGINAL_FORMAT_EXCEPTION = None
 
 
 def patch_logging() -> None:
     """Add SensitiveDataFilter to all existing and future log handlers.
 
-    Also installs a custom LogRecordFactory so that sanitization happens
-    *before* any handler sees the record, closing the buffer/RPC blind spot.
+    Also installs:
+    - A custom LogRecordFactory so msg/args are sanitized before handlers
+    - A Formatter.formatException wrapper so exc_text is sanitized when
+      generated (exc_text is populated lazily, so the factory can't catch it)
 
     Safe to call multiple times — will only apply once.
     """
     global _LOGGING_PATCHED, _SENSITIVE_FILTER, _ORIGINAL_HANDLER_INIT
+    global _ORIGINAL_RECORD_FACTORY, _ORIGINAL_FORMAT_EXCEPTION
 
     if _LOGGING_PATCHED:
         return
 
     _SENSITIVE_FILTER = SensitiveDataFilter()
+    compiled = _get_default_compiled_patterns()
 
     # Add filter to all existing handlers
     for handler in logging.root.handlers:
@@ -369,8 +375,20 @@ def patch_logging() -> None:
 
     logging.Handler.__init__ = patched_handler_init
 
-    # Install a custom LogRecordFactory for pre-handler sanitization
-    _install_sanitizing_record_factory()
+    # Install a custom LogRecordFactory for pre-handler sanitization of msg/args
+    _ORIGINAL_RECORD_FACTORY = logging.getLogRecordFactory()
+    _install_sanitizing_record_factory(_ORIGINAL_RECORD_FACTORY)
+
+    # Patch Formatter.formatException so exc_text is sanitized when generated.
+    # exc_text is populated lazily during format() — after both the factory
+    # and filter have already run — so it must be caught at the source.
+    _ORIGINAL_FORMAT_EXCEPTION = logging.Formatter.formatException
+
+    def sanitized_format_exception(self, ei):
+        text = _ORIGINAL_FORMAT_EXCEPTION(self, ei)
+        return sanitize_text(text, compiled)
+
+    logging.Formatter.formatException = sanitized_format_exception
 
     _LOGGING_PATCHED = True
 
@@ -378,12 +396,21 @@ def patch_logging() -> None:
 def unpatch_logging() -> None:
     """Remove the logging monkeypatch. Mainly useful for testing."""
     global _LOGGING_PATCHED, _SENSITIVE_FILTER, _ORIGINAL_HANDLER_INIT
+    global _ORIGINAL_RECORD_FACTORY, _ORIGINAL_FORMAT_EXCEPTION
 
     if not _LOGGING_PATCHED:
         return
 
     if _ORIGINAL_HANDLER_INIT is not None:
         logging.Handler.__init__ = _ORIGINAL_HANDLER_INIT
+
+    # Restore original LogRecordFactory
+    if _ORIGINAL_RECORD_FACTORY is not None:
+        logging.setLogRecordFactory(_ORIGINAL_RECORD_FACTORY)
+
+    # Restore original Formatter.formatException
+    if _ORIGINAL_FORMAT_EXCEPTION is not None:
+        logging.Formatter.formatException = _ORIGINAL_FORMAT_EXCEPTION
 
     # Remove filter from existing handlers
     if _SENSITIVE_FILTER is not None:
@@ -393,6 +420,8 @@ def unpatch_logging() -> None:
     _LOGGING_PATCHED = False
     _SENSITIVE_FILTER = None
     _ORIGINAL_HANDLER_INIT = None
+    _ORIGINAL_RECORD_FACTORY = None
+    _ORIGINAL_FORMAT_EXCEPTION = None
 
 
 def is_logging_patched() -> bool:
@@ -427,13 +456,17 @@ def _sanitize_any(value: Any, compiled_patterns: list) -> str | Any:
     return value
 
 
-def _install_sanitizing_record_factory() -> None:
+def _install_sanitizing_record_factory(original_factory) -> None:
     """Wrap the current LogRecordFactory so every record is sanitized at creation.
 
     This ensures sanitization happens *before* any handler or filter sees
-    the record, closing the FTBufferingHandler / RPC blind spot.
+    the record, closing the FTBufferingHandler / RPC blind spot where
+    ``exc_text`` and ``message`` are read verbatim from the buffer.
+
+    The factory only sanitizes string values within existing arg structures —
+    it never converts a dict to a tuple, which would break ``%(name)s``
+    formatting and cause ``KeyError``.
     """
-    original_factory = logging.getLogRecordFactory()
     compiled = _get_default_compiled_patterns()
 
     def sanitizing_factory(*args, **kwargs):
@@ -442,15 +475,18 @@ def _install_sanitizing_record_factory() -> None:
             record.msg = sanitize_text(record.msg, compiled)
         if record.args:
             if isinstance(record.args, dict):
-                msg = record.msg if record.msg else ""
-                if "%s" in msg and "%(" not in msg:
-                    record.args = (sanitize_text(str(record.args), compiled),)
-                else:
-                    record.args = {
-                        k: _sanitize_any(v, compiled) for k, v in record.args.items()
-                    }
+                # Always preserve dict shape — never convert to tuple.
+                # This handles both %(name)s named args and single-dict %s args.
+                # The handler-level Filter handles the %s-with-dict edge case.
+                record.args = {
+                    k: _sanitize_any(v, compiled) for k, v in record.args.items()
+                }
             elif isinstance(record.args, tuple):
                 record.args = tuple(_sanitize_any(a, compiled) for a in record.args)
+        # Sanitize exception text — this is what _rpc_get_logs reads from
+        # bufferHandler.buffer[].exc_text verbatim.
+        if record.exc_text and isinstance(record.exc_text, str):
+            record.exc_text = sanitize_text(record.exc_text, compiled)
         return record
 
     logging.setLogRecordFactory(sanitizing_factory)

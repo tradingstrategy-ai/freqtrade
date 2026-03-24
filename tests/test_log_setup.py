@@ -1,4 +1,5 @@
 import logging
+import logging.handlers
 import re
 import sys
 
@@ -360,15 +361,18 @@ class TestSensitiveDataFilter:
     def test_filter_method_with_dict_args(self):
         """Test that dict-style args (for %(name)s formatting) are handled correctly."""
         f = SensitiveDataFilter()
+        # Set args after construction to avoid Python 3.12 LogRecord.__init__
+        # bug with single-key dict args (KeyError: 0 on args[0] check)
         record = logging.LogRecord(
             name="test",
             level=logging.INFO,
             pathname="",
             lineno=0,
             msg="Config: %(config)s",
-            args={"config": '{"privateKey": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"}'},
+            args=None,
             exc_info=None,
         )
+        record.args = {"config": '{"privateKey": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"}'}
         result = f.filter(record)
         assert result is True
         assert isinstance(record.args, dict)
@@ -621,6 +625,73 @@ class TestPatchLogging:
         assert is_logging_patched()
         unpatch_logging()
         assert not is_logging_patched()
+
+    def test_unpatch_restores_record_factory(self):
+        """unpatch_logging must restore the original LogRecordFactory."""
+        original = logging.getLogRecordFactory()
+        patch_logging()
+        # Factory should be different while patched
+        assert logging.getLogRecordFactory() is not original
+        unpatch_logging()
+        # Factory must be restored
+        assert logging.getLogRecordFactory() is original
+
+    def test_exc_text_sanitized_in_buffer(self):
+        """Exception text must be sanitized in the log record for RPC buffer safety."""
+        try:
+            patch_logging()
+            logger_test = logging.getLogger("test.exc_text_buffer")
+            logger_test.setLevel(logging.DEBUG)
+
+            # Create a handler that captures records (like FTBufferingHandler)
+            import io
+            handler = logging.handlers.MemoryHandler(capacity=100)
+            logger_test.addHandler(handler)
+
+            key = "0x" + "ef" * 32
+            try:
+                raise ValueError(f"Transaction failed with key {key}")
+            except ValueError:
+                logger_test.exception("Error occurred")
+
+            # Check the buffered record's exc_text
+            assert len(handler.buffer) > 0
+            record = handler.buffer[-1]
+            # Force exc_text generation if not yet set
+            if record.exc_text is None:
+                formatter = logging.Formatter()
+                formatter.format(record)
+            assert key not in (record.exc_text or ""), \
+                f"Raw key leaked in exc_text: {record.exc_text}"
+
+            logger_test.removeHandler(handler)
+        finally:
+            unpatch_logging()
+
+    def test_dict_args_with_named_format_preserved(self):
+        """Dict args for %(name)s formatting must stay as dicts, not become tuples."""
+        try:
+            patch_logging()
+            # Construct record with args=None, then set args after to avoid
+            # Python 3.12 LogRecord.__init__ bug with single-key dict args
+            record = logging.LogRecord(
+                name="test",
+                level=logging.INFO,
+                pathname="",
+                lineno=0,
+                msg="Config: %(config)s",
+                args=None,
+                exc_info=None,
+            )
+            record.args = {"config": "some_value"}
+            # The record should still format correctly
+            formatter = logging.Formatter("%(message)s")
+            message = formatter.format(record)
+            assert "some_value" in message
+            # Args must still be a dict
+            assert isinstance(record.args, dict)
+        finally:
+            unpatch_logging()
 
 
 class TestPatchNotebook:
