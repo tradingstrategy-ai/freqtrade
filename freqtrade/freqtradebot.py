@@ -2367,6 +2367,25 @@ class FreqtradeBot(LoggingMixin):
         trade = self._update_trade_after_fill(trade, order_obj, send_msg)
         Trade.commit()
 
+        if (
+            order_obj.ft_order_side == trade.exit_side
+            and not trade.is_open
+        ):
+            consume_pending_reentry = getattr(
+                self.strategy, "_consume_pending_reentry", None
+            )
+            if callable(consume_pending_reentry):
+                pending = consume_pending_reentry(trade.pair)
+                if pending:
+                    self.execute_entry(
+                        trade.pair,
+                        self.wallets.get_trade_stake_amount(
+                            trade.pair, self.config["max_open_trades"]
+                        ),
+                        enter_tag=pending.get("enter_tag"),
+                        is_short=pending.get("direction") == "short",
+                    )
+
         self.order_close_notify(trade, order_obj, stoploss_order, send_msg)
 
         return False

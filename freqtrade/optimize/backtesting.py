@@ -1164,17 +1164,29 @@ class Backtesting:
         self, trade: LocalTrade, row: tuple, current_time: datetime
     ) -> LocalTrade | None:
         self._run_funding_fees(trade, current_time)
+        net_sleeve_mode = bool(getattr(self.strategy, "_nautilus_net_sleeves_v1", False))
+        pending_plan = None
+        if net_sleeve_mode:
+            pending_plans = getattr(self.strategy, "_net_sleeve_pending_plans", None)
+            if isinstance(pending_plans, dict):
+                pending_plan = pending_plans.get(trade.pair)
+        skip_phase1_exit_checks = bool(
+            net_sleeve_mode
+            and isinstance(pending_plan, dict)
+            and pending_plan.get("plan_kind") == "reduce"
+        )
 
         # Check if we need to adjust our current positions
         if self.strategy.position_adjustment_enable:
             trade = self._check_adjust_trade_for_candle(trade, row, current_time)
 
         if trade.is_open:
-            phase1_exit_trade = self._check_phase1_sleeve_exit(
-                trade, row, current_time
-            )
-            if phase1_exit_trade:
-                return phase1_exit_trade
+            if not skip_phase1_exit_checks:
+                phase1_exit_trade = self._check_phase1_sleeve_exit(
+                    trade, row, current_time
+                )
+                if phase1_exit_trade:
+                    return phase1_exit_trade
             enter = row[SHORT_IDX] if trade.is_short else row[LONG_IDX]
             exit_sig = row[ESHORT_IDX] if trade.is_short else row[ELONG_IDX]
             exits = self.strategy.should_exit(
@@ -1187,14 +1199,15 @@ class Backtesting:
                 high=row[HIGH_IDX],
             )
             for exit_ in exits:
-                phase1_owner_exit_trade = self._check_phase1_owner_exit(
-                    trade,
-                    row,
-                    current_time,
-                    exit_,
-                )
-                if phase1_owner_exit_trade:
-                    return phase1_owner_exit_trade
+                if not skip_phase1_exit_checks:
+                    phase1_owner_exit_trade = self._check_phase1_owner_exit(
+                        trade,
+                        row,
+                        current_time,
+                        exit_,
+                    )
+                    if phase1_owner_exit_trade:
+                        return phase1_owner_exit_trade
                 t = self._get_exit_for_signal(trade, row, exit_, current_time)
                 if t:
                     return t
@@ -2249,6 +2262,24 @@ class Backtesting:
             order = trade.select_order(trade.exit_side, is_open=True)
             if order:
                 self._process_exit_order(order, trade, current_time, row, pair)
+
+            if not trade.is_open:
+                consume_pending_reentry = getattr(
+                    self.strategy, "_consume_pending_reentry", None
+                )
+                if callable(consume_pending_reentry):
+                    pending = consume_pending_reentry(pair)
+                    if pending and self.trade_slot_available(
+                        LocalTrade.bt_open_open_trade_count
+                    ):
+                        flip_trade = self._enter_trade(
+                            pair,
+                            row,
+                            pending["direction"],
+                            entry_tag1=pending.get("enter_tag"),
+                        )
+                        if flip_trade:
+                            self.wallets.update()
 
         if exiting_dir and len(LocalTrade.bt_trades_open_pp[pair]) == 0:
             return exiting_dir
