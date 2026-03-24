@@ -2250,6 +2250,21 @@ class Backtesting:
             if order:
                 self._process_exit_order(order, trade, current_time, row, pair)
 
+            # 5b. Mixed-direction flip reentry after exit fill
+            if not trade.is_open:
+                _consume = getattr(self.strategy, '_consume_pending_reentry', None)
+                if callable(_consume):
+                    pending = _consume(pair)
+                    if pending and self.trade_slot_available(
+                        LocalTrade.bt_open_open_trade_count
+                    ):
+                        flip_trade = self._enter_trade(
+                            pair, row, pending["direction"],
+                            entry_tag1=pending.get("enter_tag"),
+                        )
+                        if flip_trade:
+                            self.wallets.update()
+
         if exiting_dir and len(LocalTrade.bt_trades_open_pp[pair]) == 0:
             return exiting_dir
         return None
