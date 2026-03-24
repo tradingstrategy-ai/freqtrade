@@ -397,7 +397,7 @@ class Exchange:
             "walletAddress": exchange_config.get(
                 "wallet_address", exchange_config.get("walletAddress")
             ),
-            "privateKey": exchange_config.get("private_key", exchange_config.get("privateKey")),
+            "privateKey": self._resolve_private_key(exchange_config),
         }
         if ccxt_kwargs:
             logger.info("Applying additional ccxt config: %s", ccxt_kwargs)
@@ -414,6 +414,30 @@ class Exchange:
             raise OperationalException(f"Initialization of ccxt failed. Reason: {e}") from e
 
         return api
+
+    @staticmethod
+    def _resolve_private_key(exchange_config: dict) -> str | None:
+        """
+        Resolve the private key from environment variable or legacy config field.
+
+        Preferred: ``private_key_env`` — name of an env var holding the key.
+        Legacy fallback: ``private_key`` / ``privateKey`` — still accepted for
+        backwards compatibility but rejected by config validation when set in files.
+        """
+        env_var_name = exchange_config.get("private_key_env")
+        if env_var_name:
+            import os
+
+            value = os.environ.get(env_var_name)
+            if not value:
+                raise OperationalException(
+                    f"private_key_env is set to '{env_var_name}' but the environment "
+                    f"variable is not set or is empty."
+                )
+            return value
+        # Legacy fallback — config validation will reject raw keys in files,
+        # but programmatic callers may still pass them in-memory.
+        return exchange_config.get("private_key", exchange_config.get("privateKey"))
 
     @property
     def _ccxt_config(self) -> dict:

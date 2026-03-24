@@ -11,7 +11,17 @@ from freqtrade.loggers import (
     setup_logging,
     setup_logging_pre,
 )
-from freqtrade.loggers.sensitive_filter import SensitiveDataFilter
+from freqtrade.loggers.sensitive_filter import (
+    SensitiveDataFilter,
+    contains_secret,
+    is_logging_patched,
+    is_notebook_patched,
+    patch_logging,
+    patch_notebook,
+    sanitize_text,
+    unpatch_logging,
+    unpatch_notebook,
+)
 from freqtrade.loggers.set_log_levels import (
     reduce_verbosity_for_bias_tester,
     restore_verbosity_for_bias_tester,
@@ -464,3 +474,176 @@ class TestSensitiveDataFilter:
         result = f._sanitize(text)
         assert "0x742d35cc6634c0532925a3b844bc454e4438f44e" not in result
         assert "[REDACTED]" in result
+
+
+class TestSanitizeTextHelpers:
+    """Tests for the module-level sanitize_text, contains_secret, etc."""
+
+    def test_sanitize_text_bare_hex_key(self):
+        """Bare 0x + 64 hex chars are redacted even without a key name."""
+        key = "0x" + "ab" * 32  # 64 hex chars
+        result = sanitize_text(f"Using key {key} for signing")
+        assert key not in result
+        assert "[REDACTED-KEY]" in result
+
+    def test_sanitize_text_preserves_short_hex(self):
+        """Short hex strings (tx hashes, addresses) are NOT redacted by bare key pattern."""
+        tx_hash = "0x" + "ab" * 16  # Only 32 hex chars
+        result = sanitize_text(f"TX: {tx_hash}")
+        assert tx_hash in result  # Should NOT be redacted
+
+    def test_sanitize_text_pem_key(self):
+        """PEM private key blocks are redacted."""
+        pem = "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg...\n-----END PRIVATE KEY-----"
+        result = sanitize_text(f"Key: {pem}")
+        assert "MIIEvQIBADANBg" not in result
+        assert "[REDACTED-PEM-KEY]" in result
+
+    def test_sanitize_text_ed25519_secret(self):
+        """ed25519 secret format is redacted."""
+        secret = "ed25519:JC5mjh84GkitnPrzvJLeN8AJ8CGZeKNfrvZmLJ9cBC6w"
+        result = sanitize_text(f"Secret: {secret}")
+        assert "JC5mjh84Gki" not in result
+        assert "[REDACTED-ED25519]" in result
+
+    def test_contains_secret_positive(self):
+        """contains_secret returns True for bare hex keys."""
+        key = "0x" + "ab" * 32
+        assert contains_secret(f"key={key}") is True
+
+    def test_contains_secret_negative(self):
+        """contains_secret returns False for normal text."""
+        assert contains_secret("Hello world, price is $100.50") is False
+
+    def test_contains_secret_pem(self):
+        """contains_secret detects PEM blocks."""
+        pem = "-----BEGIN PRIVATE KEY-----\ndata\n-----END PRIVATE KEY-----"
+        assert contains_secret(pem) is True
+
+    def test_contains_secret_keyed_pattern(self):
+        """contains_secret detects keyed patterns like apiKey."""
+        text = "{'apiKey': 'my-super-secret-api-key-12345'}"
+        assert contains_secret(text) is True
+
+    def test_sanitize_text_exc_text_redacted(self):
+        """Exception text on LogRecord is also sanitized."""
+        f = SensitiveDataFilter()
+        record = logging.LogRecord(
+            name="test", level=logging.INFO, pathname="", lineno=0,
+            msg="error", args=(), exc_info=None,
+        )
+        key = "0x" + "ab" * 32
+        record.exc_text = f"Traceback: privateKey={key}"
+        f.filter(record)
+        assert key not in record.exc_text
+        assert "[REDACTED" in record.exc_text
+
+
+class TestConfigValidationPrivateKeys:
+    """Tests for _validate_no_raw_private_keys."""
+
+    def test_rejects_raw_private_key_top_level(self):
+        """Raw private_key at exchange level is rejected."""
+        from freqtrade.configuration.config_validation import _validate_no_raw_private_keys
+        from freqtrade.exceptions import ConfigurationError
+
+        conf = {"exchange": {"name": "gmx", "private_key": "0x" + "ab" * 32}}
+        with pytest.raises(ConfigurationError, match="Raw private key found"):
+            _validate_no_raw_private_keys(conf)
+
+    def test_rejects_raw_privateKey_top_level(self):
+        """Raw privateKey (camelCase) at exchange level is rejected."""
+        from freqtrade.configuration.config_validation import _validate_no_raw_private_keys
+        from freqtrade.exceptions import ConfigurationError
+
+        conf = {"exchange": {"name": "gmx", "privateKey": "0x" + "ab" * 32}}
+        with pytest.raises(ConfigurationError, match="Raw private key found"):
+            _validate_no_raw_private_keys(conf)
+
+    def test_rejects_raw_key_in_ccxt_config(self):
+        """Raw privateKey inside ccxt_config is rejected."""
+        from freqtrade.configuration.config_validation import _validate_no_raw_private_keys
+        from freqtrade.exceptions import ConfigurationError
+
+        conf = {
+            "exchange": {
+                "name": "gmx",
+                "ccxt_config": {"privateKey": "0x" + "ab" * 32},
+            }
+        }
+        with pytest.raises(ConfigurationError, match="ccxt_config"):
+            _validate_no_raw_private_keys(conf)
+
+    def test_rejects_raw_key_in_ccxt_sync_config(self):
+        """Raw privateKey inside ccxt_sync_config is rejected."""
+        from freqtrade.configuration.config_validation import _validate_no_raw_private_keys
+        from freqtrade.exceptions import ConfigurationError
+
+        conf = {
+            "exchange": {
+                "name": "gmx",
+                "ccxt_sync_config": {"privateKey": "0x" + "ab" * 32},
+            }
+        }
+        with pytest.raises(ConfigurationError, match="ccxt_sync_config"):
+            _validate_no_raw_private_keys(conf)
+
+    def test_accepts_private_key_env(self):
+        """private_key_env is accepted (no error raised)."""
+        from freqtrade.configuration.config_validation import _validate_no_raw_private_keys
+
+        conf = {"exchange": {"name": "gmx", "private_key_env": "GMX_PRIVATE_KEY"}}
+        _validate_no_raw_private_keys(conf)  # Should not raise
+
+    def test_accepts_no_private_key(self):
+        """Config without any private key field is accepted."""
+        from freqtrade.configuration.config_validation import _validate_no_raw_private_keys
+
+        conf = {"exchange": {"name": "binance", "key": "abc", "secret": "def"}}
+        _validate_no_raw_private_keys(conf)  # Should not raise
+
+
+class TestPatchLogging:
+    """Tests for patch_logging / unpatch_logging."""
+
+    def test_patch_logging_idempotent(self):
+        """Calling patch_logging multiple times is safe."""
+        try:
+            patch_logging()
+            patch_logging()  # Second call should be no-op
+            assert is_logging_patched()
+        finally:
+            unpatch_logging()
+
+    def test_unpatch_restores_state(self):
+        """unpatch_logging restores original state."""
+        patch_logging()
+        assert is_logging_patched()
+        unpatch_logging()
+        assert not is_logging_patched()
+
+
+class TestPatchNotebook:
+    """Tests for notebook patching (stdout/stderr channels)."""
+
+    def test_patch_notebook_noop_without_ipython(self):
+        """patch_notebook is a no-op when IPython is not running."""
+        patch_notebook()
+        # Should not raise, and should not be marked as patched
+        # (unless we're actually in IPython, which we're not in pytest)
+        # Just verify it doesn't crash
+        unpatch_notebook()
+
+    def test_patch_notebook_idempotent(self):
+        """Calling patch_notebook multiple times is safe."""
+        patch_notebook()
+        patch_notebook()
+        unpatch_notebook()
+
+    def test_sanitize_text_through_stdout_mock(self):
+        """Verify sanitize_text works on stdout-like content."""
+        key = "0x" + "cd" * 32
+        output = f"Debug: wallet key is {key}"
+        sanitized = sanitize_text(output)
+        assert key not in sanitized
+        assert "[REDACTED-KEY]" in sanitized
