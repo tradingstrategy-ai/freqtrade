@@ -230,8 +230,8 @@ def patch_notebook() -> None:
             text = sanitize_text(text, compiled)
         return _ORIGINAL_STDERR_WRITE(text)
 
-    sys.stdout.write = _sanitized_stdout_write
-    sys.stderr.write = _sanitized_stderr_write
+    sys.stdout.write = _sanitized_stdout_write  # type: ignore[method-assign]
+    sys.stderr.write = _sanitized_stderr_write  # type: ignore[method-assign]
 
     # --- Channel 2: DisplayHook (last-expression auto-display) ---
     if hasattr(ipython, "displayhook") and hasattr(ipython.displayhook, "write_format_data"):
@@ -241,7 +241,7 @@ def patch_notebook() -> None:
             format_dict = sanitize_mime_bundle(format_dict)
             return _ORIGINAL_WRITE_FORMAT_DATA(format_dict, md_dict)
 
-        ipython.displayhook.write_format_data = _sanitized_write_format_data
+        ipython.displayhook.write_format_data = _sanitized_write_format_data  # type: ignore[method-assign]
 
     # --- Channel 3: publish_display_data (display() calls) ---
     try:
@@ -256,7 +256,7 @@ def patch_notebook() -> None:
                 data, metadata, transient=transient, **kwargs
             )
 
-        _display_mod.publish_display_data = _sanitized_publish_display_data
+        _display_mod.publish_display_data = _sanitized_publish_display_data  # type: ignore[method-assign]
     except (ImportError, AttributeError):
         pass
 
@@ -279,7 +279,7 @@ def patch_notebook() -> None:
             if sanitized:
                 old_stderr.write(sanitized)
 
-        ipython.showtraceback = _sanitized_showtraceback
+        ipython.showtraceback = _sanitized_showtraceback  # type: ignore[method-assign]
 
     _NOTEBOOK_PATCHED = True
 
@@ -295,25 +295,25 @@ def unpatch_notebook() -> None:
         return
 
     if _ORIGINAL_STDOUT_WRITE is not None:
-        sys.stdout.write = _ORIGINAL_STDOUT_WRITE
+        sys.stdout.write = _ORIGINAL_STDOUT_WRITE  # type: ignore[method-assign]
     if _ORIGINAL_STDERR_WRITE is not None:
-        sys.stderr.write = _ORIGINAL_STDERR_WRITE
+        sys.stderr.write = _ORIGINAL_STDERR_WRITE  # type: ignore[method-assign]
 
     try:
         from IPython import get_ipython
         ipython = get_ipython()
         if ipython is not None:
             if _ORIGINAL_WRITE_FORMAT_DATA is not None:
-                ipython.displayhook.write_format_data = _ORIGINAL_WRITE_FORMAT_DATA
+                ipython.displayhook.write_format_data = _ORIGINAL_WRITE_FORMAT_DATA  # type: ignore[method-assign]
             if _ORIGINAL_SHOWTRACEBACK is not None:
-                ipython.showtraceback = _ORIGINAL_SHOWTRACEBACK
+                ipython.showtraceback = _ORIGINAL_SHOWTRACEBACK  # type: ignore[method-assign]
     except ImportError:
         pass
 
     if _ORIGINAL_PUBLISH_DISPLAY_DATA is not None:
         try:
             import IPython.core.display_functions as _display_mod
-            _display_mod.publish_display_data = _ORIGINAL_PUBLISH_DISPLAY_DATA
+            _display_mod.publish_display_data = _ORIGINAL_PUBLISH_DISPLAY_DATA  # type: ignore[method-assign]
         except (ImportError, AttributeError):
             pass
 
@@ -372,7 +372,7 @@ def patch_logging() -> None:
         if _SENSITIVE_FILTER is not None:
             self.addFilter(_SENSITIVE_FILTER)
 
-    logging.Handler.__init__ = patched_handler_init
+    logging.Handler.__init__ = patched_handler_init  # type: ignore[method-assign]
 
     # Install a custom LogRecordFactory for pre-handler sanitization of msg/args
     _ORIGINAL_RECORD_FACTORY = logging.getLogRecordFactory()
@@ -387,7 +387,7 @@ def patch_logging() -> None:
         text = _ORIGINAL_FORMAT_EXCEPTION(self, ei)
         return sanitize_text(text, compiled)
 
-    logging.Formatter.formatException = sanitized_format_exception
+    logging.Formatter.formatException = sanitized_format_exception  # type: ignore[method-assign]
 
     _LOGGING_PATCHED = True
 
@@ -401,7 +401,7 @@ def unpatch_logging() -> None:
         return
 
     if _ORIGINAL_HANDLER_INIT is not None:
-        logging.Handler.__init__ = _ORIGINAL_HANDLER_INIT
+        logging.Handler.__init__ = _ORIGINAL_HANDLER_INIT  # type: ignore[method-assign]
 
     # Restore original LogRecordFactory
     if _ORIGINAL_RECORD_FACTORY is not None:
@@ -409,7 +409,7 @@ def unpatch_logging() -> None:
 
     # Restore original Formatter.formatException
     if _ORIGINAL_FORMAT_EXCEPTION is not None:
-        logging.Formatter.formatException = _ORIGINAL_FORMAT_EXCEPTION
+        logging.Formatter.formatException = _ORIGINAL_FORMAT_EXCEPTION  # type: ignore[method-assign]
 
     # Remove filter from existing handlers
     if _SENSITIVE_FILTER is not None:
