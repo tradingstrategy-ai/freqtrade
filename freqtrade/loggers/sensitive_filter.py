@@ -4,10 +4,9 @@ import sys
 from typing import Any
 
 
-# Bare private key pattern: 0x followed by exactly 64 hex chars (256-bit key),
-# but NOT longer (which would be a signature or tx hash).
+# Bare private key pattern: optionally 0x-prefixed, exactly 64 hex chars (256-bit key).
 # Uses word boundary to avoid matching inside longer hex strings.
-_BARE_HEX_KEY_RE = re.compile(r"\b0x[0-9a-fA-F]{64}\b")
+_BARE_HEX_KEY_RE = re.compile(r"\b(?:0x)?[0-9a-fA-F]{64}\b")
 
 # PEM private key blocks
 _PEM_KEY_RE = re.compile(
