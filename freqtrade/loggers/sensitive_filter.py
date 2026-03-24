@@ -38,11 +38,11 @@ class SensitiveDataFilter(logging.Filter):
         # Passwords (any non-empty value)
         (r"'password':\s*'([^']+)'", r"'password': '[REDACTED]'"),
         (r'"password":\s*"([^"]+)"', r'"password": "[REDACTED]"'),
-        # Private keys (64+ char hex strings) — keyed format
-        (r"'privateKey':\s*'(0x[0-9a-fA-F]{64,})'", r"'privateKey': '[REDACTED]'"),
-        (r'"privateKey":\s*"(0x[0-9a-fA-F]{64,})"', r'"privateKey": "[REDACTED]"'),
-        (r"'private_key':\s*'(0x[0-9a-fA-F]{64,})'", r"'private_key': '[REDACTED]'"),
-        (r'"private_key":\s*"(0x[0-9a-fA-F]{64,})"', r'"private_key": "[REDACTED]"'),
+        # Private keys (64+ char hex, optionally 0x-prefixed) — keyed format
+        (r"'privateKey':\s*'(?:0x)?([0-9a-fA-F]{64,})'", r"'privateKey': '[REDACTED]'"),
+        (r'"privateKey":\s*"(?:0x)?([0-9a-fA-F]{64,})"', r'"privateKey": "[REDACTED]"'),
+        (r"'private_key':\s*'(?:0x)?([0-9a-fA-F]{64,})'", r"'private_key': '[REDACTED]'"),
+        (r'"private_key":\s*"(?:0x)?([0-9a-fA-F]{64,})"', r'"private_key": "[REDACTED]"'),
         # Account IDs (hex addresses, 40+ chars)
         (r"'accountId':\s*'(0x[0-9a-fA-F]{40,})'", r"'accountId': '[REDACTED]'"),
         (r'"accountId":\s*"(0x[0-9a-fA-F]{40,})"', r'"accountId": "[REDACTED]"'),
