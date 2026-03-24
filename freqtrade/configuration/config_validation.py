@@ -79,6 +79,9 @@ def validate_config_consistency(conf: dict[str, Any], *, preliminary: bool = Fal
     :return: Returns None if everything is ok, otherwise throw an ConfigurationError
     """
 
+    # Reject raw private keys before any other validation can echo the value
+    _validate_no_raw_private_keys(conf)
+
     # validating trailing stoploss
     _validate_trailing_stoploss(conf)
     _validate_price_config(conf)
@@ -96,6 +99,39 @@ def validate_config_consistency(conf: dict[str, Any], *, preliminary: bool = Fal
     # validate configuration before returning
     logger.info("Validating configuration ...")
     validate_config_schema(conf, preliminary=preliminary)
+
+
+def _validate_no_raw_private_keys(conf: dict[str, Any]) -> None:
+    """
+    Reject configurations that contain raw private keys.
+
+    Raw private keys must never appear in config files. Use ``private_key_env``
+    to reference an environment variable instead.
+    """
+    exchange_conf = conf.get("exchange", {})
+
+    # Check top-level exchange fields
+    for field in ("private_key", "privateKey"):
+        if exchange_conf.get(field):
+            raise ConfigurationError(
+                f"Raw private key found in exchange.{field}. "
+                "This is a security risk — private keys must not be stored in config files. "
+                "Use 'private_key_env' to specify an environment variable name instead. "
+                "Example: \"private_key_env\": \"GMX_PRIVATE_KEY\""
+            )
+
+    # Check nested ccxt config sections
+    for section in ("ccxt_config", "ccxt_sync_config", "ccxt_async_config"):
+        nested = exchange_conf.get(section, {})
+        if isinstance(nested, dict):
+            for field in ("privateKey", "private_key"):
+                if nested.get(field):
+                    raise ConfigurationError(
+                        f"Raw private key found in exchange.{section}.{field}. "
+                        "This is a security risk — private keys must not be stored in "
+                        "config files. Use 'private_key_env' at the exchange level instead. "
+                        "Example: \"private_key_env\": \"GMX_PRIVATE_KEY\""
+                    )
 
 
 def _validate_unlimited_amount(conf: dict[str, Any]) -> None:

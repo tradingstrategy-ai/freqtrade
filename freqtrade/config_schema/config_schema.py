@@ -874,8 +874,18 @@ CONF_SCHEMA = {
                 },
                 "private_key": {
                     "description": (
-                        "Private key for the exchange, if required. Usually used by DEX exchanges. "
+                        "DEPRECATED: Raw private keys in config files are a security risk. "
+                        "Use 'private_key_env' instead to reference an environment variable. "
                         f"{__VIA_ENV} FREQTRADE__EXCHANGE__PRIVATE_KEY"
+                    ),
+                    "type": "string",
+                },
+                "private_key_env": {
+                    "description": (
+                        "Name of the environment variable containing the private key. "
+                        "The key is resolved at runtime and never stored in config. "
+                        "Example: \"GMX_PRIVATE_KEY\". "
+                        f"{__VIA_ENV} FREQTRADE__EXCHANGE__PRIVATE_KEY_ENV"
                     ),
                     "type": "string",
                 },
