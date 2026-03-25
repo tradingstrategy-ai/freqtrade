@@ -220,7 +220,11 @@ class Exchange:
         exchange_conf: ExchangeConfig = exchange_config if exchange_config else config["exchange"]
         # Preserve wallet address before credential stripping for ExchangeWS rate limit monitoring
         # (remove_exchange_credentials strips walletAddress in dry_run mode)
-        _preserved_wallet_address: str = exchange_conf.get('walletAddress', '') or exchange_conf.get('wallet_address', '') or ''
+        _preserved_wallet_address: str = (
+            exchange_conf.get('walletAddress', '')
+            or exchange_conf.get('wallet_address', '')
+            or ''
+        )
 
         # Deep merge ft_has with default ft_has options
         # Must be called before ft_has is used.

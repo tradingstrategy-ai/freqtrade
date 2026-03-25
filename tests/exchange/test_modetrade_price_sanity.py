@@ -294,7 +294,10 @@ class TestModeTradeDelistingDetection:
         # Create a function that returns a new TemporaryError each time (needed for multiple raises)
         def create_temp_error():
             bad_symbol_error = ccxt.BadSymbol(f"modetrade does not have market symbol {test_pair}")
-            temp_error = TemporaryError(f"Could not get order book due to BadSymbol. Message: {bad_symbol_error}")
+            temp_error = TemporaryError(
+                "Could not get order book due to "
+                f"BadSymbol. Message: {bad_symbol_error}"
+            )
             temp_error.__cause__ = bad_symbol_error
             return temp_error
 

@@ -96,7 +96,11 @@ print(f"_bad_symbol_count: {exchange._bad_symbol_count}")
 print(f"_delisted_pairs: {exchange._delisted_pairs}")
 
 if test_pair in exchange._delisted_pairs:
-    print(f"\n✅ TEST PASSED: Logic correctly marks pair as delisted after {exchange._bad_symbol_threshold} attempts")
+    threshold = exchange._bad_symbol_threshold
+    print(
+        f"\n✅ TEST PASSED: Logic correctly marks pair "
+        f"as delisted after {threshold} attempts"
+    )
     print("✅ Raises DDosProtection on threshold")
     print("✅ Raises TemporaryError before threshold")
 else:

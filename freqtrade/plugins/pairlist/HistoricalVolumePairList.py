@@ -126,13 +126,19 @@ class HistoricalVolumePairList(IPairList):
                 "type": "string",
                 "default": "",
                 "description": "Source file pair suffix (auto-derived if empty)",
-                "help": "File naming suffix. Auto-derived from stake_currency + trading_mode if not set.",
+                "help": (
+                    "File naming suffix. Auto-derived from"
+                    " stake_currency + trading_mode if not set."
+                ),
             },
             "token_mapping": {
                 "type": "object",
                 "default": {},
                 "description": "Token name mapping",
-                "help": "Map source file token names to trading pair names (e.g. {'kPEPE': 'KPEPE'}).",
+                "help": (
+                    "Map source file token names to trading"
+                    " pair names (e.g. {'kPEPE': 'KPEPE'})."
+                ),
             },
         }
 

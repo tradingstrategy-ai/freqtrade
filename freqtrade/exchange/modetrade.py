@@ -189,7 +189,10 @@ class Modetrade(Exchange):
 
         cfg = self._modetrade_price_sanity_cfg()
         if not cfg["enabled"]:
-            return super().get_rate(pair, refresh, side, is_short, order_book=order_book, ticker=ticker)
+            return super().get_rate(
+                pair, refresh, side, is_short,
+                order_book=order_book, ticker=ticker,
+            )
 
         # Get fresh order book price
         # This may raise DDosProtection if pair is delisted (caught by fetch_l2_order_book)
@@ -205,7 +208,10 @@ class Modetrade(Exchange):
                 if ticker is None:
                     ticker = self.fetch_ticker(pair)
                 # Use ticker-only pricing
-                return super().get_rate(pair, refresh, side, is_short, order_book=None, ticker=ticker)
+                return super().get_rate(
+                    pair, refresh, side, is_short,
+                    order_book=None, ticker=ticker,
+                )
             raise
 
         # Get mark/index reference
@@ -427,16 +433,24 @@ class Modetrade(Exchange):
                     # Log clear actionable message
                     if added_to_blacklist:
                         logger.error(
-                            f"⚠️  PAIR DELISTED: {pair} failed with BadSymbol {failure_count} times. "
-                            f"This pair appears to be delisted from the exchange. "
-                            f"Automatically added to runtime blacklist. "
-                            f"RECOMMENDED: Add '{pair}' to pair_blacklist in your config file for persistence."
+                            f"⚠️  PAIR DELISTED: {pair} failed "
+                            f"with BadSymbol {failure_count} times. "
+                            f"This pair appears to be delisted "
+                            f"from the exchange. "
+                            f"Automatically added to runtime "
+                            f"blacklist. "
+                            f"RECOMMENDED: Add '{pair}' to "
+                            f"pair_blacklist in your config file "
+                            f"for persistence."
                         )
                     else:
                         logger.error(
-                            f"⚠️  PAIR DELISTED: {pair} failed with BadSymbol {failure_count} times. "
-                            f"This pair appears to be delisted from the exchange. "
-                            f"Pair already in blacklist - no new entry attempts will be made."
+                            f"⚠️  PAIR DELISTED: {pair} failed "
+                            f"with BadSymbol {failure_count} times. "
+                            f"This pair appears to be delisted "
+                            f"from the exchange. "
+                            f"Pair already in blacklist - no new "
+                            f"entry attempts will be made."
                         )
 
                     # Raise DDosProtection to prevent infinite retry loop
@@ -448,8 +462,11 @@ class Modetrade(Exchange):
                 else:
                     # Still tracking, log progress
                     logger.warning(
-                        f"BadSymbol error for {pair} ({failure_count}/{self._bad_symbol_threshold}). "
-                        f"Will mark as delisted if this continues."
+                        f"BadSymbol error for {pair} "
+                        f"({failure_count}/"
+                        f"{self._bad_symbol_threshold}). "
+                        f"Will mark as delisted if this "
+                        f"continues."
                     )
                     # Re-raise for retry
                     raise

@@ -111,7 +111,11 @@ class Woofipro(Exchange):
         for token, balance in balances.items():
             if balance["free"] is None:
                 new_balances[token]["frozen"] = float(balance["frozen"])
-                new_balances[token]["free"] = float(Decimal(balance["total"]) - Decimal(balance["frozen"]))
+                free_amount = (
+                    Decimal(balance["total"])
+                    - Decimal(balance["frozen"])
+                )
+                new_balances[token]["free"] = float(free_amount)
                 new_balances[token]["used"] = float(balance["frozen"])
         return new_balances
 

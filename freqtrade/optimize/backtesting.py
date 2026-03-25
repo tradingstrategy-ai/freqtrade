@@ -871,7 +871,8 @@ class Backtesting:
                 if "quantity_units" in sleeve_copy:
                     planned_units = (
                         float(planned_exit["quantity_units"])
-                        if planned_exit is not None and planned_exit.get("quantity_units") is not None
+                        if planned_exit is not None
+                        and planned_exit.get("quantity_units") is not None
                         else float(sleeve_copy["quantity_units"])
                     )
                     remaining_units = max(0.0, float(sleeve_copy["quantity_units"]) - planned_units)
