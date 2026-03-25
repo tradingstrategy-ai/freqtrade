@@ -2,16 +2,14 @@
 Tests for HistoricalVolumePairList pairlist plugin.
 """
 
-from datetime import datetime, timezone
-from unittest.mock import MagicMock, PropertyMock
+from datetime import UTC, datetime
+from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
 
 from freqtrade.plugins.pairlist.HistoricalVolumePairList import HistoricalVolumePairList
 from freqtrade.plugins.pairlist.IPairList import SupportsBacktesting
-from freqtrade.plugins.pairlistmanager import PairListManager
-from tests.conftest import EXMS, get_patched_exchange
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +283,7 @@ class TestFilterPairlist:
             "data_source_dir": str(volume_data_dir),
             "number_assets": 10,
         })
-        plm._current_time = datetime(2025, 1, 5, 12, 0, tzinfo=timezone.utc)
+        plm._current_time = datetime(2025, 1, 5, 12, 0, tzinfo=UTC)
 
         # Input in arbitrary order, including a pair not in volume data
         input_list = ["DOGE/USDC:USDC", "BTC/USDC:USDC", "UNKNOWN/USDC:USDC", "ETH/USDC:USDC"]
@@ -299,7 +297,7 @@ class TestFilterPairlist:
             "data_source_dir": str(volume_data_dir),
         })
         # Date after data range — should fall back to last available date
-        plm._current_time = datetime(2025, 2, 1, 0, 0, tzinfo=timezone.utc)
+        plm._current_time = datetime(2025, 2, 1, 0, 0, tzinfo=UTC)
 
         result = handler.filter_pairlist(["BTC/USDC:USDC", "ETH/USDC:USDC"], {})
         assert len(result) == 2
@@ -325,7 +323,7 @@ class TestFilterPairlist:
         handler, plm = _make_handler(mocker, pairlistconfig={
             "data_source_dir": str(tmp_path),
         })
-        plm._current_time = datetime(2025, 1, 5, 0, 0, tzinfo=timezone.utc)
+        plm._current_time = datetime(2025, 1, 5, 0, 0, tzinfo=UTC)
 
         input_list = ["BTC/USDC:USDC", "ETH/USDC:USDC"]
         # Empty data → empty rankings → no earlier date found → return original
@@ -337,7 +335,7 @@ class TestFilterPairlist:
         handler, plm = _make_handler(mocker, pairlistconfig={
             "data_source_dir": str(volume_data_dir),
         })
-        plm._current_time = datetime(2024, 1, 1, 0, 0, tzinfo=timezone.utc)
+        plm._current_time = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
 
         input_list = ["BTC/USDC:USDC"]
         result = handler.filter_pairlist(input_list, {})
@@ -399,7 +397,7 @@ class TestPairlistChainIntegration:
             "number_assets": 2,
             "lookback_days": 7,
         })
-        plm._current_time = datetime(2025, 1, 8, 0, 0, tzinfo=timezone.utc)
+        plm._current_time = datetime(2025, 1, 8, 0, 0, tzinfo=UTC)
 
         # Simulate StaticPairList output (all 3 pairs)
         static_output = ["BTC/USDC:USDC", "ETH/USDC:USDC", "DOGE/USDC:USDC"]
@@ -417,7 +415,7 @@ class TestPairlistChainIntegration:
             "data_source_dir": str(volume_data_dir),
             "number_assets": 10,
         })
-        plm._current_time = datetime(2025, 1, 8, 0, 0, tzinfo=timezone.utc)
+        plm._current_time = datetime(2025, 1, 8, 0, 0, tzinfo=UTC)
 
         # Input in reverse volume order
         result = handler.filter_pairlist(
@@ -609,7 +607,7 @@ class TestCaseInsensitiveMatching:
         handler, plm = _make_handler(mocker, pairlistconfig={
             "data_source_dir": str(tmp_path),
         })
-        plm._current_time = datetime(2025, 1, 3, 0, 0, tzinfo=timezone.utc)
+        plm._current_time = datetime(2025, 1, 3, 0, 0, tzinfo=UTC)
 
         # Whitelist uses uppercase KPEPE
         result = handler.filter_pairlist(["KPEPE/USDC:USDC"], {})
@@ -635,7 +633,7 @@ class TestCaseInsensitiveMatching:
         handler, plm = _make_handler(mocker, pairlistconfig={
             "data_source_dir": str(tmp_path),
         })
-        plm._current_time = datetime(2025, 1, 3, 0, 0, tzinfo=timezone.utc)
+        plm._current_time = datetime(2025, 1, 3, 0, 0, tzinfo=UTC)
 
         # Even if we pass weird casing, the result uses the input pairlist's casing
         result = handler.filter_pairlist(["BTC/USDC:USDC", "ETH/USDC:USDC"], {})
@@ -665,7 +663,7 @@ class TestCaseInsensitiveMatching:
             "data_source_dir": str(tmp_path),
             # No token_mapping!
         })
-        plm._current_time = datetime(2025, 1, 3, 0, 0, tzinfo=timezone.utc)
+        plm._current_time = datetime(2025, 1, 3, 0, 0, tzinfo=UTC)
 
         # Whitelist uses uppercase K
         whitelist = [f"{t[1:].upper()}/USDC:USDC" for t in k_tokens]
@@ -696,7 +694,7 @@ class TestCaseInsensitiveMatching:
         handler, plm = _make_handler(mocker, pairlistconfig={
             "data_source_dir": str(tmp_path),
         })
-        plm._current_time = datetime(2025, 1, 3, 0, 0, tzinfo=timezone.utc)
+        plm._current_time = datetime(2025, 1, 3, 0, 0, tzinfo=UTC)
 
         result = handler.filter_pairlist(
             ["KAITO/USDC:USDC", "KAS/USDC:USDC"], {}
@@ -713,7 +711,7 @@ class TestGracefulDegradation:
     def test_exception_returns_original_pairlist(self, mocker):
         """If internal logic throws, filter_pairlist returns input unchanged."""
         handler, plm = _make_handler(mocker)
-        plm._current_time = datetime(2025, 1, 5, 0, 0, tzinfo=timezone.utc)
+        plm._current_time = datetime(2025, 1, 5, 0, 0, tzinfo=UTC)
 
         # Force _build_daily_rankings to throw
         handler._build_daily_rankings = MagicMock(
@@ -729,7 +727,7 @@ class TestGracefulDegradation:
         handler, plm = _make_handler(mocker, pairlistconfig={
             "data_source_dir": "/totally/nonexistent/path",
         })
-        plm._current_time = datetime(2025, 1, 5, 0, 0, tzinfo=timezone.utc)
+        plm._current_time = datetime(2025, 1, 5, 0, 0, tzinfo=UTC)
 
         input_list = ["BTC/USDC:USDC"]
         # Should not raise — empty data → empty rankings → return original

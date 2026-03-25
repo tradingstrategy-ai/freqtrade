@@ -1,6 +1,7 @@
 """Unit tests for ModeTrade price sanity check logic"""
 
 import pytest
+
 from freqtrade.exchange.modetrade import Modetrade
 
 
@@ -276,9 +277,11 @@ class TestModeTradeDelistingDetection:
 
     def test_badsymbol_tracking_increments(self):
         """Test that BadSymbol failures are tracked correctly"""
-        import ccxt
         from unittest.mock import patch
-        from freqtrade.exceptions import TemporaryError, DDosProtection
+
+        import ccxt
+
+        from freqtrade.exceptions import DDosProtection, TemporaryError
 
         # Create mock exchange instance
         modetrade = Modetrade({'name': 'modetrade', 'dry_run': True})
@@ -339,8 +342,10 @@ class TestModeTradeDelistingDetection:
 
     def test_successful_fetch_resets_counter(self):
         """Test that successful fetch resets the failure counter"""
-        import ccxt
         from unittest.mock import patch
+
+        import ccxt
+
         from freqtrade.exceptions import TemporaryError
 
         modetrade = Modetrade({'name': 'modetrade', 'dry_run': True})

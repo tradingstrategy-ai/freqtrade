@@ -689,7 +689,7 @@ class ExchangeWS:
                                 f"[RATE-LIMIT] IP={ip} rate limit query failed: HTTP {resp.status}"
                             )
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning(f"[RATE-LIMIT] IP={ip} rate limit query timed out")
             except Exception as e:
                 logger.warning(f"[RATE-LIMIT] IP={ip} rate limit query error: {e}")

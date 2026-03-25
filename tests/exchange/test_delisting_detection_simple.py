@@ -5,10 +5,14 @@ Tests the delisting detection without needing full bot startup.
 """
 
 import sys
+
+
 sys.path.insert(0, 'deps/freqtrade')
 
 import ccxt
+
 from freqtrade.exceptions import DDosProtection, TemporaryError
+
 
 print("=" * 80)
 print("REPL TEST: BadSymbol Detection Logic")
@@ -71,7 +75,7 @@ for attempt in range(1, 5):
     try:
         print(f"   Calling fetch_l2_order_book('{test_pair}')...")
         order_book = exchange.fetch_l2_order_book(test_pair, 1)
-        print(f"   ✓ Got order book (unexpected!)")
+        print("   ✓ Got order book (unexpected!)")
     except DDosProtection as e:
         print(f"   ✓ CAUGHT DDosProtection: {e}")
     except TemporaryError as e:
@@ -82,7 +86,7 @@ for attempt in range(1, 5):
     print(f"   State: count={exchange._bad_symbol_count}, delisted={exchange._delisted_pairs}")
 
     if test_pair in exchange._delisted_pairs:
-        print(f"\n   🎯 PAIR MARKED AS DELISTED!")
+        print("\n   🎯 PAIR MARKED AS DELISTED!")
         break
 
 print("\n" + "="*80)
@@ -93,19 +97,19 @@ print(f"_delisted_pairs: {exchange._delisted_pairs}")
 
 if test_pair in exchange._delisted_pairs:
     print(f"\n✅ TEST PASSED: Logic correctly marks pair as delisted after {exchange._bad_symbol_threshold} attempts")
-    print(f"✅ Raises DDosProtection on threshold")
-    print(f"✅ Raises TemporaryError before threshold")
+    print("✅ Raises DDosProtection on threshold")
+    print("✅ Raises TemporaryError before threshold")
 else:
-    print(f"\n❌ TEST FAILED")
+    print("\n❌ TEST FAILED")
 
 print("\n" + "="*80)
 print("TESTING SUBSEQUENT CALLS TO DELISTED PAIR")
 print("="*80)
 
 try:
-    print(f"Calling fetch_l2_order_book on already-delisted pair...")
+    print("Calling fetch_l2_order_book on already-delisted pair...")
     exchange.fetch_l2_order_book(test_pair, 1)
-    print(f"❌ Should have raised DDosProtection immediately!")
+    print("❌ Should have raised DDosProtection immediately!")
 except DDosProtection as e:
     print(f"✅ Correctly raised DDosProtection immediately: {e}")
 except Exception as e:

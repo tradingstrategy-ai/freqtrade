@@ -108,7 +108,7 @@ from freqtrade.misc import (
     safe_value_fallback2,
 )
 from freqtrade.util import dt_from_ts, dt_now
-from freqtrade.util.datetime_helpers import dt_humanize_delta, dt_ts, format_ms_time
+from freqtrade.util.datetime_helpers import dt_humanize_delta, dt_ts
 from freqtrade.util.periodic_cache import PeriodicCache
 
 

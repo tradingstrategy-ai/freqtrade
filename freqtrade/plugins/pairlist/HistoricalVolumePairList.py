@@ -24,7 +24,7 @@ and trading_mode. Override pair_suffix explicitly only if needed.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -331,7 +331,7 @@ class HistoricalVolumePairList(IPairList):
         # Get current backtest time from pairlist manager
         current_time = self._pairlistmanager._current_time
         if current_time is None:
-            current_time = datetime.now(timezone.utc)
+            current_time = datetime.now(UTC)
 
         day_str = str(current_time.date())
 

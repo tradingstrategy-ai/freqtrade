@@ -419,7 +419,7 @@ def calculate_calmar(
     except ValueError:
         max_drawdown = 0
 
-    # Standard Calmar formula: CAGR / Max Drawdown 
+    # Standard Calmar formula: CAGR / Max Drawdown
     if max_drawdown != 0:
         calmar_ratio = cagr / max_drawdown
     else:

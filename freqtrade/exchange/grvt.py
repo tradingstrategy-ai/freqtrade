@@ -2,11 +2,12 @@
 import logging
 from typing import Any
 
-from freqtrade.enums import TradingMode, MarginMode
+import ccxt
+
+from freqtrade.enums import MarginMode, TradingMode
 from freqtrade.exchange import Exchange
 from freqtrade.exchange.exchange_types import FtHas
 
-import ccxt
 
 try:
     from pysdk.grvt_ccxt import GrvtCcxt

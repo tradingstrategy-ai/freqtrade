@@ -643,7 +643,6 @@ class TestPatchLogging:
             logger_test.setLevel(logging.DEBUG)
 
             # Create a handler that captures records (like FTBufferingHandler)
-            import io
             handler = logging.handlers.MemoryHandler(capacity=100)
             logger_test.addHandler(handler)
 
