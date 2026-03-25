@@ -54,7 +54,7 @@ class MockExchange:
                     f"(BadSymbol threshold {self._bad_symbol_threshold} reached)"
                 ) from e
             else:
-                print(f"   ℹ️  BadSymbol for {pair} ({failure_count}/{self._bad_symbol_threshold})")
+                print(f"   [i] BadSymbol for {pair} ({failure_count}/{self._bad_symbol_threshold})")
                 raise TemporaryError(
                     f"Could not get order book due to {e.__class__.__name__}. Message: {e}"
                 ) from e

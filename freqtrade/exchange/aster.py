@@ -167,8 +167,8 @@ class Aster(Exchange):
         """
         if is_new_pair and candle_type in (CandleType.SPOT, CandleType.FUTURES, CandleType.MARK):
             with self._loop_lock:
-                assert self._api_async
-                assert self._api_async.features
+                assert self._api_async  # noqa: S101
+                assert self._api_async.features  # noqa: S101
 
                 x = self.loop.run_until_complete(
                     self._async_get_candle_history(pair, timeframe, candle_type, 0)

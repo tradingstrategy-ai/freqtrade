@@ -751,10 +751,10 @@ class TestGracefulDegradation:
         df.to_feather(futures_dir / "BTC_USDC_USDC-1d-futures.feather")
 
         # Write corrupted file
-        with open(futures_dir / "BAD_USDC_USDC-1d-futures.feather", "wb") as f:
+        with (futures_dir / "BAD_USDC_USDC-1d-futures.feather").open("wb") as f:
             f.write(b"not a feather file")
 
-        handler, plm = _make_handler(mocker, pairlistconfig={
+        handler, _plm = _make_handler(mocker, pairlistconfig={
             "data_source_dir": str(tmp_path),
         })
         handler._load_volume_data()

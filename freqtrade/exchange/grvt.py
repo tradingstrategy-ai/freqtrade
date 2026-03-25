@@ -5,6 +5,7 @@ from typing import Any
 import ccxt
 
 from freqtrade.enums import MarginMode, TradingMode
+from freqtrade.exceptions import OperationalException
 from freqtrade.exchange import Exchange
 from freqtrade.exchange.exchange_types import FtHas
 
@@ -13,8 +14,8 @@ try:
     from pysdk.grvt_ccxt import GrvtCcxt
     from pysdk.grvt_ccxt_env import GrvtEnv
     from pysdk.grvt_ccxt_logging_selector import logger
-    from pysdk.grvt_ccxt_test_utils import validate_return_values
-    from pysdk.grvt_ccxt_utils import rand_uint32
+    from pysdk.grvt_ccxt_test_utils import validate_return_values  # noqa: F401
+    from pysdk.grvt_ccxt_utils import rand_uint32  # noqa: F401
 except ImportError:
     GrvtCcxt = None
 
@@ -54,14 +55,15 @@ class Grvt(Exchange):
         Initialize ccxt with given config and return valid ccxt instance.
         """
         # Find matching class for the given exchange name
-        name = exchange_config["name"]
-        assert sync, "async not supported by grvt-pysdk"
+        if not sync:
+            raise OperationalException("async not supported by grvt-pysdk")
         ex_config = {
             "api_key": exchange_config.get("api_key"),
             "trading_account_id": exchange_config.get("trading_account_id"),
             "private_key": exchange_config.get("private_key"),
         }
-        assert "api_key" in ex_config, "api_key is required"
+        if "api_key" not in ex_config:
+            raise OperationalException("api_key is required for GRVT")
 
         api = GrvtCcxt(
             GrvtEnv.PROD,

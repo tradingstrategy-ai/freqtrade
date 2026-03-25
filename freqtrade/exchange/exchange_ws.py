@@ -825,7 +825,7 @@ class ExchangeWS:
                         if ip in self._ws_exchanges:
                             try:
                                 await self._ws_exchanges[ip].close()
-                            except Exception:
+                            except Exception:  # noqa: S110
                                 pass
 
                         self._ws_exchanges[ip] = self._create_single_ws_exchange(ip)
@@ -990,10 +990,6 @@ class ExchangeWS:
         In pair distribution mode, gets data from the assigned IP for this pair.
         """
         try:
-            current_time = time.time()
-            current_minute = int(current_time // 60) % 60
-            near_boundary = current_minute >= 58 or current_minute <= 2
-
             # Get the exchange assigned to this pair
             ws_exchange, assigned_ip = self._get_ws_exchange_for_pair(pair)
 
@@ -1129,7 +1125,7 @@ class ExchangeWS:
         self._klines_scheduled.discard((pair, timeframe, candle_type))
         self._pop_history((pair, timeframe, candle_type))
 
-    async def _continuously_async_watch_ohlcv(
+    async def _continuously_async_watch_ohlcv(  # noqa: C901
         self, pair: str, timeframe: str, candle_type: CandleType,
         ws_exchange: ccxt.Exchange, assigned_ip: str
     ) -> None:
@@ -1270,7 +1266,11 @@ class ExchangeWS:
 
             # Handle IP failure - mark IP as failed and allow pair redistribution
             if self._ip_pool:
-                asyncio.create_task(self._handle_ip_failure(assigned_ip, pair))
+                task = asyncio.create_task(
+                    self._handle_ip_failure(assigned_ip, pair)
+                )
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
         finally:
             logger.debug(
                 f"[WS-STOPPED] Watch ended for {pair}/{timeframe} on IP {assigned_ip} "

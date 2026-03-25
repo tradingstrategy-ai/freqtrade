@@ -1404,7 +1404,7 @@ class Backtesting:
         }
 
     @staticmethod
-    def _build_phase1_net_exit_plan(
+    def _build_phase1_net_exit_plan(  # noqa: C901
         trade: LocalTrade,
         phase1_netting_exit_intents: str | None,
     ) -> dict | None:
@@ -2312,7 +2312,7 @@ class Backtesting:
             for pair in new_pairlist:
                 yield current_time_det, is_first, has_detail, idx, pair
 
-    def time_pair_generator(
+    def time_pair_generator(  # noqa: C901
         self,
         start_date: datetime,
         end_date: datetime,
