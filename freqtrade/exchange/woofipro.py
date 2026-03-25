@@ -5,16 +5,17 @@ from copy import deepcopy
 from decimal import Decimal
 
 import ccxt
+
 from freqtrade.enums.marginmode import MarginMode
 from freqtrade.enums.tradingmode import TradingMode
-from freqtrade.exchange import Exchange
-from freqtrade.exchange.exchange_types import CcxtBalances, FtHas
-from freqtrade.exchange.common import retrier
 from freqtrade.exceptions import (
     DDosProtection,
     OperationalException,
     TemporaryError,
 )
+from freqtrade.exchange import Exchange
+from freqtrade.exchange.common import retrier
+from freqtrade.exchange.exchange_types import CcxtBalances, FtHas
 
 
 logger = logging.getLogger(__name__)
@@ -110,10 +111,14 @@ class Woofipro(Exchange):
         for token, balance in balances.items():
             if balance["free"] is None:
                 new_balances[token]["frozen"] = float(balance["frozen"])
-                new_balances[token]["free"] = float(Decimal(balance["total"]) - Decimal(balance["frozen"]))
+                free_amount = (
+                    Decimal(balance["total"])
+                    - Decimal(balance["frozen"])
+                )
+                new_balances[token]["free"] = float(free_amount)
                 new_balances[token]["used"] = float(balance["frozen"])
         return new_balances
-    
+
     @retrier
     def _set_leverage(
         self,
@@ -127,7 +132,7 @@ class Woofipro(Exchange):
         if self._config["dry_run"] or not self.exchange_has("setLeverage"):
             # Some exchanges only support one margin_mode type
             return
-        
+
         # Orderly requires integer leverage
         leverage = int(leverage)
 

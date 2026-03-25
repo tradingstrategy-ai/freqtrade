@@ -264,21 +264,33 @@ class TestSensitiveDataFilter:
 
     def test_redacts_private_key_double_quotes(self):
         f = SensitiveDataFilter()
-        text = '{"privateKey": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"}'
+        hex_key = (
+            "0x1234567890abcdef1234567890abcdef"
+            "1234567890abcdef1234567890abcdef"
+        )
+        text = '{"privateKey": "' + hex_key + '"}'
         result = f._sanitize(text)
         assert "[REDACTED]" in result
         assert "1234567890abcdef" not in result
 
     def test_redacts_private_key_single_quotes(self):
         f = SensitiveDataFilter()
-        text = "{'privateKey': '0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef'}"
+        hex_key = (
+            "0x1234567890abcdef1234567890abcdef"
+            "1234567890abcdef1234567890abcdef"
+        )
+        text = "{'privateKey': '" + hex_key + "'}"
         result = f._sanitize(text)
         assert "[REDACTED]" in result
         assert "1234567890abcdef" not in result
 
     def test_redacts_private_key_snake_case(self):
         f = SensitiveDataFilter()
-        text = '{"private_key": "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"}'
+        hex_key = (
+            "0xabcdef1234567890abcdef1234567890"
+            "abcdef1234567890abcdef1234567890"
+        )
+        text = '{"private_key": "' + hex_key + '"}'
         result = f._sanitize(text)
         assert "[REDACTED]" in result
         assert "abcdef1234567890" not in result
@@ -324,7 +336,11 @@ class TestSensitiveDataFilter:
             level=logging.INFO,
             pathname="",
             lineno=0,
-            msg='Request: {"privateKey": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"}',
+            msg=(
+                'Request: {"privateKey": '
+                '"0x1234567890abcdef1234567890abcdef'
+                '1234567890abcdef1234567890abcdef"}'
+            ),
             args=(),
             exc_info=None,
         )
@@ -341,7 +357,11 @@ class TestSensitiveDataFilter:
             pathname="",
             lineno=0,
             msg="Data: %s",
-            args=('{"privateKey": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"}',),
+            args=(
+                '{"privateKey": '
+                '"0x1234567890abcdef1234567890abcdef'
+                '1234567890abcdef1234567890abcdef"}',
+            ),
             exc_info=None,
         )
         result = f.filter(record)
@@ -352,7 +372,11 @@ class TestSensitiveDataFilter:
     def test_case_insensitive(self):
         f = SensitiveDataFilter()
         # Test case insensitivity for key names
-        text = '{"PRIVATEKEY": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"}'
+        hex_key = (
+            "0x1234567890abcdef1234567890abcdef"
+            "1234567890abcdef1234567890abcdef"
+        )
+        text = '{"PRIVATEKEY": "' + hex_key + '"}'
         result = f._sanitize(text)
         assert "[REDACTED]" in result
         assert "1234567890abcdef" not in result
@@ -371,7 +395,13 @@ class TestSensitiveDataFilter:
             args=None,
             exc_info=None,
         )
-        record.args = {"config": '{"privateKey": "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"}'}
+        hex_key = (
+            "0x1234567890abcdef1234567890abcdef"
+            "1234567890abcdef1234567890abcdef"
+        )
+        record.args = {
+            "config": '{"privateKey": "' + hex_key + '"}'
+        }
         result = f.filter(record)
         assert result is True
         assert isinstance(record.args, dict)
@@ -643,7 +673,6 @@ class TestPatchLogging:
             logger_test.setLevel(logging.DEBUG)
 
             # Create a handler that captures records (like FTBufferingHandler)
-            import io
             handler = logging.handlers.MemoryHandler(capacity=100)
             logger_test.addHandler(handler)
 

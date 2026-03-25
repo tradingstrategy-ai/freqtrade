@@ -4,7 +4,7 @@
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import ccxt
 from pandas import DataFrame
@@ -167,8 +167,8 @@ class Aster(Exchange):
         """
         if is_new_pair and candle_type in (CandleType.SPOT, CandleType.FUTURES, CandleType.MARK):
             with self._loop_lock:
-                assert self._api_async
-                assert self._api_async.features
+                assert self._api_async  # noqa: S101
+                assert self._api_async.features  # noqa: S101
 
                 x = self.loop.run_until_complete(
                     self._async_get_candle_history(pair, timeframe, candle_type, 0)
@@ -178,7 +178,7 @@ class Aster(Exchange):
                 since_ms = x[3][0][0]
                 logger.info(
                     f"Candle-data for {pair} available starting with "
-                    f"{datetime.fromtimestamp(since_ms // 1000, tz=timezone.utc).isoformat()}."
+                    f"{datetime.fromtimestamp(since_ms // 1000, tz=UTC).isoformat()}."
                 )
                 if until_ms and since_ms >= until_ms:
                     logger.warning(

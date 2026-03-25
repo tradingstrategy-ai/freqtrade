@@ -4,6 +4,7 @@ from freqtrade.exchange.common import MAP_EXCHANGE_CHILDCLASS
 from freqtrade.exchange.exchange import Exchange
 
 # isort: on
+from freqtrade.exchange.aster import Aster
 from freqtrade.exchange.binance import Binance
 from freqtrade.exchange.bingx import Bingx
 from freqtrade.exchange.bitget import Bitget
@@ -37,6 +38,7 @@ from freqtrade.exchange.exchange_utils_timeframe import (
     timeframe_to_seconds,
 )
 from freqtrade.exchange.gate import Gate
+from freqtrade.exchange.grvt import Grvt
 from freqtrade.exchange.hitbtc import Hitbtc
 from freqtrade.exchange.htx import Htx
 from freqtrade.exchange.hyperliquid import Hyperliquid
@@ -44,14 +46,8 @@ from freqtrade.exchange.idex import Idex
 from freqtrade.exchange.kraken import Kraken
 from freqtrade.exchange.kucoin import Kucoin
 from freqtrade.exchange.lbank import Lbank
-
-from freqtrade.exchange.okx import Okx
-from freqtrade.exchange.aster import Aster
-from freqtrade.exchange.woofipro import Woofipro
-from freqtrade.exchange.grvt import Grvt
-from freqtrade.exchange.modetrade import Modetrade
-
 from freqtrade.exchange.luno import Luno
 from freqtrade.exchange.modetrade import Modetrade
 from freqtrade.exchange.okx import MyOkx, Okx
+from freqtrade.exchange.woofipro import Woofipro
 

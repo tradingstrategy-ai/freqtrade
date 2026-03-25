@@ -1,19 +1,20 @@
 """Mode exchange subclass"""
 
 import logging
-from typing import Any, Dict, Optional, Set
+from typing import Any
 
 import ccxt
+
 from freqtrade.enums.marginmode import MarginMode
 from freqtrade.enums.tradingmode import TradingMode
-from freqtrade.exchange import Exchange
-from freqtrade.exchange.exchange_types import FtHas, Ticker, OrderBook
-from freqtrade.exchange.common import retrier
 from freqtrade.exceptions import (
     DDosProtection,
     OperationalException,
     TemporaryError,
 )
+from freqtrade.exchange import Exchange
+from freqtrade.exchange.common import retrier
+from freqtrade.exchange.exchange_types import FtHas, OrderBook
 
 
 logger = logging.getLogger(__name__)
@@ -47,12 +48,12 @@ class Modetrade(Exchange):
         # "ws_enabled": True,
     }
 
-    def __init__(self, config: Dict[str, Any], *, validate: bool = True, **kwargs) -> None:
+    def __init__(self, config: dict[str, Any], *, validate: bool = True, **kwargs) -> None:
         """Initialize ModeTrade exchange with delisting detection."""
         super().__init__(config, validate=validate, **kwargs)
         # Track BadSymbol failures per pair for delisting detection
-        self._bad_symbol_count: Dict[str, int] = {}
-        self._delisted_pairs: Set[str] = set()
+        self._bad_symbol_count: dict[str, int] = {}
+        self._delisted_pairs: set[str] = set()
         # Mark pair as delisted after N consecutive BadSymbol failures
         self._bad_symbol_threshold = 3
         logger.info(
@@ -188,7 +189,10 @@ class Modetrade(Exchange):
 
         cfg = self._modetrade_price_sanity_cfg()
         if not cfg["enabled"]:
-            return super().get_rate(pair, refresh, side, is_short, order_book=order_book, ticker=ticker)
+            return super().get_rate(
+                pair, refresh, side, is_short,
+                order_book=order_book, ticker=ticker,
+            )
 
         # Get fresh order book price
         # This may raise DDosProtection if pair is delisted (caught by fetch_l2_order_book)
@@ -204,18 +208,21 @@ class Modetrade(Exchange):
                 if ticker is None:
                     ticker = self.fetch_ticker(pair)
                 # Use ticker-only pricing
-                return super().get_rate(pair, refresh, side, is_short, order_book=None, ticker=ticker)
+                return super().get_rate(
+                    pair, refresh, side, is_short,
+                    order_book=None, ticker=ticker,
+                )
             raise
-        
+
         # Get mark/index reference
         idx, mark, ref_err = self._get_reference_price(pair, ticker)
         ref_price = idx if idx is not None else mark
-        
+
         # Determine which price to use
         if ref_price is not None:
             deviation = self._rel_deviation(ob_rate, ref_price)
             max_dev = cfg["max_deviation_ratio"]
-            
+
             if deviation <= max_dev:
                 chosen_rate = ob_rate
                 action = "use_orderbook"
@@ -226,7 +233,7 @@ class Modetrade(Exchange):
             chosen_rate = ob_rate
             action = "use_orderbook_no_ref"
             deviation = None
-        
+
         # Log decision
         self._log_price_decision({
             "pair": pair,
@@ -242,7 +249,7 @@ class Modetrade(Exchange):
             "ref_err": ref_err,
             "log_level": cfg["log_level"],
         })
-        
+
         return chosen_rate
 
     def _get_reference_price(
@@ -261,7 +268,7 @@ class Modetrade(Exchange):
         dev_str = f"{data['deviation']:.2%}" if data['deviation'] is not None else "N/A"
         idx_str = f"{data['idx']:.6f}" if data['idx'] is not None else "N/A"
         mark_str = f"{data['mark']:.6f}" if data['mark'] is not None else "N/A"
-        
+
         msg = (
             f"ModeTrade price check: {data['action']} | "
             f"pair={data['pair']} side={data['side']} short={data['is_short']} | "
@@ -269,10 +276,10 @@ class Modetrade(Exchange):
             f"mark={mark_str} → chose={data['chosen_rate']:.6f} | "
             f"dev={dev_str} max={data['max_dev']:.1%}"
         )
-        
+
         if data['ref_err']:
             msg += f" | ref_err={data['ref_err']}"
-        
+
         getattr(logger, data['log_level'], logger.warning)(msg)
 
     # TODO: This is a spoofed with Binance data.
@@ -426,16 +433,24 @@ class Modetrade(Exchange):
                     # Log clear actionable message
                     if added_to_blacklist:
                         logger.error(
-                            f"⚠️  PAIR DELISTED: {pair} failed with BadSymbol {failure_count} times. "
-                            f"This pair appears to be delisted from the exchange. "
-                            f"Automatically added to runtime blacklist. "
-                            f"RECOMMENDED: Add '{pair}' to pair_blacklist in your config file for persistence."
+                            f"⚠️  PAIR DELISTED: {pair} failed "
+                            f"with BadSymbol {failure_count} times. "
+                            f"This pair appears to be delisted "
+                            f"from the exchange. "
+                            f"Automatically added to runtime "
+                            f"blacklist. "
+                            f"RECOMMENDED: Add '{pair}' to "
+                            f"pair_blacklist in your config file "
+                            f"for persistence."
                         )
                     else:
                         logger.error(
-                            f"⚠️  PAIR DELISTED: {pair} failed with BadSymbol {failure_count} times. "
-                            f"This pair appears to be delisted from the exchange. "
-                            f"Pair already in blacklist - no new entry attempts will be made."
+                            f"⚠️  PAIR DELISTED: {pair} failed "
+                            f"with BadSymbol {failure_count} times. "
+                            f"This pair appears to be delisted "
+                            f"from the exchange. "
+                            f"Pair already in blacklist - no new "
+                            f"entry attempts will be made."
                         )
 
                     # Raise DDosProtection to prevent infinite retry loop
@@ -447,8 +462,11 @@ class Modetrade(Exchange):
                 else:
                     # Still tracking, log progress
                     logger.warning(
-                        f"BadSymbol error for {pair} ({failure_count}/{self._bad_symbol_threshold}). "
-                        f"Will mark as delisted if this continues."
+                        f"BadSymbol error for {pair} "
+                        f"({failure_count}/"
+                        f"{self._bad_symbol_threshold}). "
+                        f"Will mark as delisted if this "
+                        f"continues."
                     )
                     # Re-raise for retry
                     raise

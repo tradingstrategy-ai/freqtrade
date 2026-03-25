@@ -8,7 +8,7 @@ import json
 import logging
 from collections import defaultdict
 from copy import deepcopy
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -871,7 +871,8 @@ class Backtesting:
                 if "quantity_units" in sleeve_copy:
                     planned_units = (
                         float(planned_exit["quantity_units"])
-                        if planned_exit is not None and planned_exit.get("quantity_units") is not None
+                        if planned_exit is not None
+                        and planned_exit.get("quantity_units") is not None
                         else float(sleeve_copy["quantity_units"])
                     )
                     remaining_units = max(0.0, float(sleeve_copy["quantity_units"]) - planned_units)
@@ -914,7 +915,7 @@ class Backtesting:
         trade.open_rate = float(remaining_sleeve.get("avg_price") or trade.open_rate)
         opened_at = datetime.fromisoformat(remaining_sleeve["opened_at"])
         if opened_at.tzinfo is not None:
-            opened_at = opened_at.astimezone(timezone.utc).replace(tzinfo=None)
+            opened_at = opened_at.astimezone(UTC).replace(tzinfo=None)
         trade.open_date = opened_at
 
     @staticmethod
@@ -1403,7 +1404,7 @@ class Backtesting:
         }
 
     @staticmethod
-    def _build_phase1_net_exit_plan(
+    def _build_phase1_net_exit_plan(  # noqa: C901
         trade: LocalTrade,
         phase1_netting_exit_intents: str | None,
     ) -> dict | None:
@@ -2311,7 +2312,7 @@ class Backtesting:
             for pair in new_pairlist:
                 yield current_time_det, is_first, has_detail, idx, pair
 
-    def time_pair_generator(
+    def time_pair_generator(  # noqa: C901
         self,
         start_date: datetime,
         end_date: datetime,

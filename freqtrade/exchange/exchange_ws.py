@@ -47,7 +47,10 @@ class ExchangeWS:
 
         # IP distribution configuration - pairs distributed across IP pool
         # Use explicit exchange_config if provided (preserves credentials), otherwise fallback
-        exchange_config = exchange_config if exchange_config is not None else config.get('exchange', {})
+        exchange_config = (
+            exchange_config if exchange_config is not None
+            else config.get('exchange', {})
+        )
         self._ip_pool: list[str] = exchange_config.get('websocket_ip_pool', [])
 
         # State tracking for IP distribution
@@ -72,7 +75,9 @@ class ExchangeWS:
         self._last_periodic_refresh: float = 0
 
         # Data freshness threshold for checking stale data
-        self._data_freshness_threshold_ms: int = exchange_config.get('ws_freshness_threshold', 300) * 1000
+        self._data_freshness_threshold_ms: int = (
+            exchange_config.get('ws_freshness_threshold', 300) * 1000
+        )
 
         # Configurable failure thresholds
         self._failure_threshold: int = exchange_config.get('ws_failure_threshold', 3)
@@ -95,12 +100,16 @@ class ExchangeWS:
         self._ip_metrics: dict[str, dict] = {}
 
         # Wallet address for rate limit queries (Hyperliquid-specific)
-        # Use explicitly passed wallet_address (preserved before credential stripping), then fallback
+        # Use explicitly passed wallet_address, then fallback
         self._wallet_address: str = wallet_address or ''
 
         # Fallback to exchange_config if not passed directly
         if not self._wallet_address:
-            self._wallet_address = exchange_config.get('walletAddress', '') or exchange_config.get('wallet_address', '') or ''
+            self._wallet_address = (
+                exchange_config.get('walletAddress', '')
+                or exchange_config.get('wallet_address', '')
+                or ''
+            )
 
         # Fallback to ccxt_object attribute
         if not self._wallet_address and hasattr(ccxt_object, 'walletAddress'):
@@ -108,9 +117,17 @@ class ExchangeWS:
 
         # Log wallet address status at startup
         if self._wallet_address:
-            logger.info(f"[IP-POOL] Wallet address configured for rate limit monitoring: {self._wallet_address[:10]}...{self._wallet_address[-6:]}")
+            addr = self._wallet_address
+            logger.info(
+                f"[IP-POOL] Wallet address configured for "
+                f"rate limit monitoring: {addr[:10]}...{addr[-6:]}"
+            )
         else:
-            logger.warning("[IP-POOL] No wallet address found - rate limit monitoring will be disabled. Check 'walletAddress' in exchange config.")
+            logger.warning(
+                "[IP-POOL] No wallet address found - rate limit "
+                "monitoring will be disabled. Check "
+                "'walletAddress' in exchange config."
+            )
 
         if self._ip_pool:
             self._ws_exchanges = self._create_ws_exchange_pool(ccxt_object)
@@ -250,7 +267,8 @@ class ExchangeWS:
             return
         pairs_per_ip = self._count_pairs_per_ip()
         stats_str = " | ".join(
-            f"{ip}: pairs={pairs_per_ip.get(ip, 0)}, streams={s['active']}, failures={s['failures']}"
+            f"{ip}: pairs={pairs_per_ip.get(ip, 0)}, "
+            f"streams={s['active']}, failures={s['failures']}"
             for ip, s in self._ip_stats.items()
         )
         logger.info(f"[IP-STATS] {stats_str}")
@@ -359,7 +377,8 @@ class ExchangeWS:
                 ).strftime('%H:%M:%S')
 
             logger.debug(
-                f"[METRICS] IP={ip} state={getattr(self._ip_states.get(ip, 'unknown'), 'value', 'unknown')} "
+                f"[METRICS] IP={ip} "
+                f"state={getattr(self._ip_states.get(ip, 'unknown'), 'value', 'unknown')} "
                 f"subscriptions={sub_count} "
                 f"candles_received={m.get('candles_received', 0)} "
                 f"last_candle={last_candle_str} "
@@ -438,7 +457,11 @@ class ExchangeWS:
             stats = self._ip_stats.get(ip, {})
 
             # Count pairs assigned to this IP
-            pairs_on_ip = [p for p, assigned_ip in self._pair_ip_assignment.items() if assigned_ip == ip]
+            pairs_on_ip = [
+                p for p, assigned_ip
+                in self._pair_ip_assignment.items()
+                if assigned_ip == ip
+            ]
             num_pairs = len(pairs_on_ip)
 
             # Count actual ohlcv subscriptions
@@ -484,7 +507,11 @@ class ExchangeWS:
         current_time = time.time()
         now_str = datetime.now().strftime('%H:%M:%S.%f')[:-3]
 
-        logger.debug(f"[CANDLE-BOUNDARY] ========== Status at :{current_minute:02d} ({now_str}) ==========")
+        logger.debug(
+            f"[CANDLE-BOUNDARY] ========== "
+            f"Status at :{current_minute:02d} ({now_str}) "
+            f"=========="
+        )
 
         for ip in self._ip_pool:
             ws_ex = self._ws_exchanges.get(ip)
@@ -492,7 +519,11 @@ class ExchangeWS:
                 continue
 
             # Sample first 3 pairs on this IP (reduced from 5)
-            pairs_on_ip = [p for p, assigned_ip in self._pair_ip_assignment.items() if assigned_ip == ip][:3]
+            pairs_on_ip = [
+                p for p, assigned_ip
+                in self._pair_ip_assignment.items()
+                if assigned_ip == ip
+            ][:3]
 
             for pair in pairs_on_ip:
                 for tf in ['1h', '4h']:
@@ -600,9 +631,16 @@ class ExchangeWS:
         # Log REST proxy consumption (all REST calls go through single proxy)
         rest_usage, rest_pct = self._get_ip_weight_usage("REST_PROXY")
         if rest_usage > 0:
-            logger.debug(f"[REST-WEIGHT] REST_PROXY={rest_usage}/{self._ip_weight_budget}({rest_pct:.0f}%)")
+            logger.debug(
+                f"[REST-WEIGHT] REST_PROXY="
+                f"{rest_usage}/{self._ip_weight_budget}"
+                f"({rest_pct:.0f}%)"
+            )
             if rest_pct > 70:
-                logger.warning(f"[REST-WEIGHT-HIGH] REST proxy at {rest_pct:.0f}% of rate limit budget")
+                logger.warning(
+                    f"[REST-WEIGHT-HIGH] REST proxy at "
+                    f"{rest_pct:.0f}% of rate limit budget"
+                )
 
         # Log WebSocket IP consumption (direct connections)
         if not self._ip_pool:
@@ -689,7 +727,7 @@ class ExchangeWS:
                                 f"[RATE-LIMIT] IP={ip} rate limit query failed: HTTP {resp.status}"
                             )
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning(f"[RATE-LIMIT] IP={ip} rate limit query timed out")
             except Exception as e:
                 logger.warning(f"[RATE-LIMIT] IP={ip} rate limit query error: {e}")
@@ -698,7 +736,10 @@ class ExchangeWS:
         active_ips = [ip for ip in self._ip_pool if self._ip_states.get(ip) == IPState.ACTIVE]
         if active_ips:
             logger.debug(f"[RATE-LIMIT] Checking rate limits for {len(active_ips)} IPs...")
-            await asyncio.gather(*[check_single_ip(ip) for ip in active_ips], return_exceptions=True)
+            await asyncio.gather(
+                *[check_single_ip(ip) for ip in active_ips],
+                return_exceptions=True,
+            )
 
     async def _refresh_all_connections(self) -> None:
         """
@@ -784,7 +825,7 @@ class ExchangeWS:
                         if ip in self._ws_exchanges:
                             try:
                                 await self._ws_exchanges[ip].close()
-                            except Exception:
+                            except Exception:  # noqa: S110
                                 pass
 
                         self._ws_exchanges[ip] = self._create_single_ws_exchange(ip)
@@ -827,12 +868,16 @@ class ExchangeWS:
         Failed IPs can recover after 5 minute cooldown.
         """
         # Increment consecutive failure count
-        self._ip_consecutive_failures[failed_ip] = self._ip_consecutive_failures.get(failed_ip, 0) + 1
+        self._ip_consecutive_failures[failed_ip] = (
+            self._ip_consecutive_failures.get(failed_ip, 0) + 1
+        )
         failure_count = self._ip_consecutive_failures[failed_ip]
 
         # Update stats
         self._ip_stats[failed_ip]['failures'] += 1
-        self._ip_stats[failed_ip]['last_failure'] = f"{pair} at {datetime.now().strftime('%H:%M:%S')}"
+        self._ip_stats[failed_ip]['last_failure'] = (
+            f"{pair} at {datetime.now().strftime('%H:%M:%S')}"
+        )
 
         # Only mark as FAILED after configured threshold of consecutive failures
         if failure_count < self._failure_threshold:
@@ -856,11 +901,17 @@ class ExchangeWS:
         )
 
         # Clear pair assignments for this IP so they get reassigned to active IPs
-        pairs_to_reassign = [p for p, ip in self._pair_ip_assignment.items() if ip == failed_ip]
+        pairs_to_reassign = [
+            p for p, ip in self._pair_ip_assignment.items()
+            if ip == failed_ip
+        ]
         for p in pairs_to_reassign:
             del self._pair_ip_assignment[p]
 
-        active_remaining = len([ip for ip in self._ip_pool if self._ip_states.get(ip) == IPState.ACTIVE])
+        active_remaining = len([
+            ip for ip in self._ip_pool
+            if self._ip_states.get(ip) == IPState.ACTIVE
+        ])
         logger.info(
             f"[IP-FAILURE] Cleared {len(pairs_to_reassign)} pairs from {failed_ip}, "
             f"{active_remaining} IPs remaining active"
@@ -939,10 +990,6 @@ class ExchangeWS:
         In pair distribution mode, gets data from the assigned IP for this pair.
         """
         try:
-            current_time = time.time()
-            current_minute = int(current_time // 60) % 60
-            near_boundary = current_minute >= 58 or current_minute <= 2
-
             # Get the exchange assigned to this pair
             ws_exchange, assigned_ip = self._get_ws_exchange_for_pair(pair)
 
@@ -959,10 +1006,15 @@ class ExchangeWS:
                 # See docs/freqtrade-fork-customizations.md for details.
                 return [list(c) for c in list(data)]
 
-            # No data from assigned IP - this shouldn't happen normally
+            # No data from assigned IP - shouldn't happen normally
+            ip_state = getattr(
+                self._ip_states.get(assigned_ip, 'unknown'),
+                'value', 'unknown',
+            )
             logger.warning(
-                f"[OHLCV-MISSING] No data for {pair}/{timeframe} from assigned IP {assigned_ip} "
-                f"(state={getattr(self._ip_states.get(assigned_ip, 'unknown'), 'value', 'unknown')})"
+                f"[OHLCV-MISSING] No data for "
+                f"{pair}/{timeframe} from assigned IP "
+                f"{assigned_ip} (state={ip_state})"
             )
 
             # Fallback to default/main exchange (no IP pool case)
@@ -1016,7 +1068,10 @@ class ExchangeWS:
                 )
 
                 task = asyncio.create_task(
-                    self._continuously_async_watch_ohlcv(pair, timeframe, candle_type, ws_exchange, assigned_ip)
+                    self._continuously_async_watch_ohlcv(
+                        pair, timeframe, candle_type,
+                        ws_exchange, assigned_ip,
+                    )
                 )
                 self._background_tasks.add(task)
                 task.add_done_callback(
@@ -1047,7 +1102,10 @@ class ExchangeWS:
 
         # Decrement active count for this IP
         if assigned_ip in self._ip_stats:
-            self._ip_stats[assigned_ip]['active'] = max(0, self._ip_stats[assigned_ip]['active'] - 1)
+            current = self._ip_stats[assigned_ip]['active']
+            self._ip_stats[assigned_ip]['active'] = max(
+                0, current - 1
+            )
 
         result = "done"
         if task.cancelled():
@@ -1067,7 +1125,7 @@ class ExchangeWS:
         self._klines_scheduled.discard((pair, timeframe, candle_type))
         self._pop_history((pair, timeframe, candle_type))
 
-    async def _continuously_async_watch_ohlcv(
+    async def _continuously_async_watch_ohlcv(  # noqa: C901
         self, pair: str, timeframe: str, candle_type: CandleType,
         ws_exchange: ccxt.Exchange, assigned_ip: str
     ) -> None:
@@ -1107,16 +1165,24 @@ class ExchangeWS:
                     # Calculate and log Time-to-First-Message (TTFM)
                     ttfm = time.time() - connect_start
                     logger.debug(
-                        f"[WS-TTFM] {pair}/{timeframe} IP={assigned_ip} time_to_first_message={ttfm:.2f}s"
+                        f"[WS-TTFM] {pair}/{timeframe} "
+                        f"IP={assigned_ip} "
+                        f"time_to_first_message={ttfm:.2f}s"
                     )
 
                     # Track connection time for this IP
-                    if assigned_ip not in self._ip_connection_start and assigned_ip in self._ip_pool:
+                    if (assigned_ip not in self._ip_connection_start
+                            and assigned_ip in self._ip_pool):
                         self._ip_connection_start[assigned_ip] = time.time()
 
                     # Reset backoff on successful connection
-                    if assigned_ip in self._ip_backoff_delay and self._ip_backoff_delay[assigned_ip] > 0:
-                        logger.debug(f"[WS-BACKOFF] IP={assigned_ip} backoff reset after successful connection")
+                    if (assigned_ip in self._ip_backoff_delay
+                            and self._ip_backoff_delay[assigned_ip] > 0):
+                        logger.debug(
+                            f"[WS-BACKOFF] IP={assigned_ip} "
+                            f"backoff reset after successful "
+                            f"connection"
+                        )
                         self._ip_backoff_delay[assigned_ip] = 0
 
                     # Reset consecutive failures on success
@@ -1124,7 +1190,12 @@ class ExchangeWS:
                         self._ip_consecutive_failures[assigned_ip] = 0
 
                     last_ts = data[-1][0] if data else 0
-                    last_time_str = datetime.fromtimestamp(last_ts / 1000).strftime('%H:%M:%S') if last_ts else 'N/A'
+                    last_time_str = (
+                        datetime.fromtimestamp(
+                            last_ts / 1000
+                        ).strftime('%H:%M:%S')
+                        if last_ts else 'N/A'
+                    )
                     logger.debug(
                         f"[WS-CONNECTED] First data for {pair}/{timeframe} on IP {assigned_ip} "
                         f"candles={len(data)} last_candle={last_time_str}"
@@ -1140,7 +1211,8 @@ class ExchangeWS:
                     age_sec = (time.time() * 1000 - last_ts) / 1000
                     logger.debug(
                         f"[WS-UPDATE] :{current_minute:02d} {pair}/{timeframe} IP={assigned_ip} "
-                        f"candles={len(data)} last={last_time_str} age={age_sec:.1f}s msg#={message_count}"
+                        f"candles={len(data)} last={last_time_str} "
+                        f"age={age_sec:.1f}s msg#={message_count}"
                     )
 
                 logger.debug(
@@ -1148,7 +1220,10 @@ class ExchangeWS:
                     f"in {(dt_ts() - start) / 1000:.3f}s"
                 )
         except ccxt.ExchangeClosedByUser:
-            logger.debug(f"[WS-CLOSED] Exchange closed by user for {pair}/{timeframe} on IP {assigned_ip}")
+            logger.debug(
+                f"[WS-CLOSED] Exchange closed by user "
+                f"for {pair}/{timeframe} on IP {assigned_ip}"
+            )
         except ccxt.BaseError as e:
             # DIAGNOSTIC: Log connection errors with full context
             error_time = datetime.now().strftime('%H:%M:%S.%f')
@@ -1173,7 +1248,9 @@ class ExchangeWS:
             )
 
             logger.debug(
-                f"[WS-BACKOFF] IP={assigned_ip} backoff_delay={new_backoff:.1f}s after {failure_count} failures"
+                f"[WS-BACKOFF] IP={assigned_ip} "
+                f"backoff_delay={new_backoff:.1f}s "
+                f"after {failure_count} failures"
             )
 
             # Track in metrics
@@ -1184,11 +1261,16 @@ class ExchangeWS:
                     'pair': pair,
                     'error': str(e)[:100]
                 })
-                self._ip_metrics[assigned_ip]['errors'] = self._ip_metrics[assigned_ip]['errors'][-10:]
+                ip_errors = self._ip_metrics[assigned_ip]['errors']
+                self._ip_metrics[assigned_ip]['errors'] = ip_errors[-10:]
 
             # Handle IP failure - mark IP as failed and allow pair redistribution
             if self._ip_pool:
-                asyncio.create_task(self._handle_ip_failure(assigned_ip, pair))
+                task = asyncio.create_task(
+                    self._handle_ip_failure(assigned_ip, pair)
+                )
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
         finally:
             logger.debug(
                 f"[WS-STOPPED] Watch ended for {pair}/{timeframe} on IP {assigned_ip} "
