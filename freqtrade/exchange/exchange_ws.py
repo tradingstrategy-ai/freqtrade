@@ -158,6 +158,34 @@ class ExchangeWS:
         # Track last hourly log time
         self._last_hourly_log: float = 0
 
+    @staticmethod
+    def _patch_ccxt_local_addr(exchange: ccxt.Exchange, ip: str) -> None:
+        """
+        Monkey-patch a ccxt async exchange instance to bind its TCP connections
+        to a specific local IP address. This replaces the need for a custom ccxt
+        fork — standard upstream ccxt does not support local_addr natively.
+
+        Must be called AFTER the exchange's async session is opened (i.e., after
+        the first WS connection attempt), or we patch open() to inject it.
+        """
+        original_open = exchange.open
+
+        def patched_open(*args, **kwargs):
+            result = original_open(*args, **kwargs)
+            # Replace the connector with one bound to our IP
+            if hasattr(exchange, 'tcp_connector') and exchange.tcp_connector is not None:
+                exchange.tcp_connector.close()
+            exchange.tcp_connector = aiohttp.TCPConnector(
+                ssl=exchange.ssl_context if hasattr(exchange, 'ssl_context') else None,
+                enable_cleanup_closed=True,
+                local_addr=(ip, 0),
+            )
+            if hasattr(exchange, 'session') and exchange.session is not None:
+                exchange.session._connector = exchange.tcp_connector
+            return result
+
+        exchange.open = patched_open
+
     def _create_single_ws_exchange(self, ip: str) -> ccxt.Exchange:
         """Create a single CCXT exchange instance bound to a specific IP."""
         template = self._ccxt_object
@@ -170,7 +198,6 @@ class ExchangeWS:
             'rateLimit': template.rateLimit,
             'options': {
                 **template.options,
-                'local_addr': (ip, 0)
             }
         }
 
@@ -180,7 +207,12 @@ class ExchangeWS:
         if hasattr(template, 'privateKey') and template.privateKey:
             exchange_config['privateKey'] = template.privateKey
 
-        return exchange_class(exchange_config)
+        instance = exchange_class(exchange_config)
+
+        # Bind this instance's connections to the specified IP
+        self._patch_ccxt_local_addr(instance, ip)
+
+        return instance
 
     def _create_ws_exchange_pool(self, template: ccxt.Exchange) -> dict[str, ccxt.Exchange]:
         """Create dedicated CCXT exchange instances for each IP in the pool."""
