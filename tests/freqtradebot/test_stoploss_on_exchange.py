@@ -1251,3 +1251,110 @@ def test_may_execute_trade_exit_after_stoploss_on_exchange_hit(
     assert rpc_mock.call_args_list[1][0][0]["amount"] > 20
     assert rpc_mock.call_args_list[2][0][0]["type"] == RPCMessageType.ENTRY_FILL
     assert rpc_mock.call_args_list[3][0][0]["type"] == RPCMessageType.EXIT_FILL
+
+
+@pytest.mark.parametrize("is_short", [False, True])
+def test_handle_stoploss_on_exchange_zombie_order(
+    mocker, default_conf_usdt, fee, caplog, is_short, limit_order
+) -> None:
+    """
+    Test that when fetch_stoploss_order raises InvalidOrderException (e.g.,
+    Hyperliquid returns "unknownOid" for purged trigger orders), the stale
+    stoploss order is explicitly marked ft_is_open=False, status="canceled"
+    so it doesn't accumulate as a zombie and block the trading loop on
+    every subsequent cycle with ~35s of retry backoff.
+    """
+    stop_order_dict = {"id": "13434334"}
+    stoploss = MagicMock(return_value=stop_order_dict)
+    enter_order = limit_order[entry_side(is_short)]
+    patch_RPCManager(mocker)
+    patch_exchange(mocker)
+    mocker.patch.multiple(
+        EXMS,
+        fetch_ticker=MagicMock(return_value={"bid": 1.9, "ask": 2.2, "last": 1.9}),
+        create_order=MagicMock(return_value=enter_order),
+        get_fee=fee,
+        create_stoploss=stoploss,
+    )
+    freqtrade = FreqtradeBot(default_conf_usdt)
+    patch_get_signal(freqtrade, enter_short=is_short, enter_long=not is_short)
+
+    freqtrade.enter_positions()
+    trade = Trade.session.scalars(select(Trade)).first()
+    assert trade.is_open
+
+    # Place stoploss
+    freqtrade.handle_stoploss_on_exchange(trade)
+    assert len(trade.open_sl_orders) == 1
+    zombie_order = trade.open_sl_orders[0]
+    assert zombie_order.ft_is_open is True
+
+    # Simulate exchange returning "unknownOid" (order purged from exchange)
+    mocker.patch.object(
+        freqtrade.exchange,
+        "fetch_stoploss_order",
+        side_effect=InvalidOrderException("unknownOid"),
+    )
+
+    freqtrade.handle_stoploss_on_exchange(trade)
+
+    # The zombie order should now be marked as canceled
+    assert zombie_order.ft_is_open is False
+    assert zombie_order.status == "canceled"
+    assert log_has_re(
+        r"Unable to fetch stoploss order .* — marking as stale: .*", caplog
+    )
+
+    # A new stoploss should have been created to replace it
+    assert trade.has_open_sl_orders is True
+    new_sl_orders = trade.open_sl_orders
+    assert len(new_sl_orders) == 1
+    assert new_sl_orders[0].order_id != zombie_order.order_id
+
+
+@pytest.mark.parametrize("is_short", [False, True])
+def test_cancel_stoploss_on_exchange_zombie_order(
+    mocker, default_conf_usdt, fee, caplog, is_short, limit_order
+) -> None:
+    """
+    Test that when cancel_stoploss_order_with_result raises InvalidOrderException,
+    the stoploss order is marked as canceled rather than staying open as a zombie.
+    """
+    stop_order_dict = {"id": "13434334"}
+    stoploss = MagicMock(return_value=stop_order_dict)
+    enter_order = limit_order[entry_side(is_short)]
+    patch_RPCManager(mocker)
+    patch_exchange(mocker)
+    mocker.patch.multiple(
+        EXMS,
+        fetch_ticker=MagicMock(return_value={"bid": 1.9, "ask": 2.2, "last": 1.9}),
+        create_order=MagicMock(return_value=enter_order),
+        get_fee=fee,
+        create_stoploss=stoploss,
+    )
+    freqtrade = FreqtradeBot(default_conf_usdt)
+    patch_get_signal(freqtrade, enter_short=is_short, enter_long=not is_short)
+
+    freqtrade.enter_positions()
+    trade = Trade.session.scalars(select(Trade)).first()
+
+    # Place stoploss
+    freqtrade.handle_stoploss_on_exchange(trade)
+    assert len(trade.open_sl_orders) == 1
+    zombie_order = trade.open_sl_orders[0]
+
+    # Simulate cancel failure (order already gone from exchange)
+    mocker.patch.object(
+        freqtrade.exchange,
+        "cancel_stoploss_order_with_result",
+        side_effect=InvalidOrderException("Order not found"),
+    )
+
+    freqtrade.cancel_stoploss_on_exchange(trade)
+
+    # The zombie order should be marked canceled
+    assert zombie_order.ft_is_open is False
+    assert zombie_order.status == "canceled"
+    assert log_has_re(
+        r"Could not cancel stoploss order .* — order no longer exists.*", caplog
+    )

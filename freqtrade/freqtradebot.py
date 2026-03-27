@@ -1083,9 +1083,12 @@ class FreqtradeBot(LoggingMixin):
                 )
                 self.update_trade_state(trade, oslo.order_id, co, stoploss_order=True)
             except InvalidOrderException:
-                logger.exception(
+                logger.warning(
                     f"Could not cancel stoploss order {oslo.order_id} for pair {trade.pair}"
+                    f" — order no longer exists on exchange, marking as canceled"
                 )
+                oslo.ft_is_open = False
+                oslo.status = "canceled"
         return trade
 
     def get_valid_enter_price_and_stake(
@@ -1459,7 +1462,14 @@ class FreqtradeBot(LoggingMixin):
                     else None
                 )
             except InvalidOrderException as exception:
-                logger.warning("Unable to fetch stoploss order: %s", exception)
+                logger.warning(
+                    "Unable to fetch stoploss order %s for %s — marking as stale: %s",
+                    slo.order_id,
+                    trade.pair,
+                    exception,
+                )
+                slo.ft_is_open = False
+                slo.status = "canceled"
 
             if stoploss_order:
                 stoploss_orders.append(stoploss_order)
