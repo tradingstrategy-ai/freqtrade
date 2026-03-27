@@ -333,89 +333,92 @@ def calculate_expectancy(trades: pd.DataFrame) -> tuple[float, float]:
     return expectancy, expectancy_ratio
 
 
+def calculate_daily_returns(
+    trades: pd.DataFrame, min_date: datetime, max_date: datetime, starting_balance: float
+) -> pd.Series:
+    """
+    Aggregate trades into daily returns normalized by starting balance.
+    :param trades: DataFrame containing trades (requires columns profit_abs, close_date)
+    :param min_date: Start date of the period
+    :param max_date: End date of the period
+    :param starting_balance: Starting balance
+    :return: Series of daily returns
+    """
+    daily_profits = (
+        trades.assign(date=pd.to_datetime(trades["close_date"]).dt.normalize())
+        .groupby("date")["profit_abs"]
+        .sum()
+    )
+
+    min_date_norm = pd.to_datetime(min_date).normalize()
+    max_date_norm = pd.to_datetime(max_date).normalize()
+    date_range = pd.date_range(start=min_date_norm, end=max_date_norm, freq="D")
+    daily_returns = daily_profits.reindex(date_range, fill_value=0.0)
+
+    return daily_returns / starting_balance
+
+
 def calculate_sortino(
-    trades: pd.DataFrame,
-    min_date: datetime | None,
-    max_date: datetime | None,
-    starting_balance: float,
+    trades: pd.DataFrame, min_date: datetime, max_date: datetime, starting_balance: float
 ) -> float:
     """
-    Calculate sortino
-    :param trades: DataFrame containing trades (requires columns profit_abs)
+    Calculate sortino using daily downside volatility.
+    :param trades: DataFrame containing trades (requires columns profit_abs and close_date)
     :return: sortino
     """
     if (len(trades) == 0) or (min_date is None) or (max_date is None) or (min_date == max_date):
         return 0
 
-    total_profit = trades["profit_abs"] / starting_balance
-    days_period = max(1, (max_date - min_date).days)
+    daily_returns = calculate_daily_returns(trades, min_date, max_date, starting_balance)
 
-    expected_returns_mean = total_profit.sum() / days_period
-
-    down_stdev = np.std(trades.loc[trades["profit_abs"] < 0, "profit_abs"] / starting_balance)
+    downside_returns = daily_returns[daily_returns < 0]
+    down_stdev = downside_returns.std() if len(downside_returns) > 0 else 0
 
     if down_stdev != 0 and not np.isnan(down_stdev):
-        sortino_ratio = expected_returns_mean / down_stdev * np.sqrt(365)
+        return daily_returns.mean() / down_stdev * np.sqrt(365)
     else:
-        # Define high (negative) sortino ratio to be clear that this is NOT optimal.
-        sortino_ratio = -100
-
-    # print(expected_returns_mean, down_stdev, sortino_ratio)
-    return sortino_ratio
+        return -100
 
 
 def calculate_sharpe(
-    trades: pd.DataFrame,
-    min_date: datetime | None,
-    max_date: datetime | None,
-    starting_balance: float,
+    trades: pd.DataFrame, min_date: datetime, max_date: datetime, starting_balance: float
 ) -> float:
     """
-    Calculate sharpe
-    :param trades: DataFrame containing trades (requires column profit_abs)
+    Calculate sharpe using daily volatility.
+    :param trades: DataFrame containing trades (requires columns profit_abs and close_date)
     :return: sharpe
     """
     if (len(trades) == 0) or (min_date is None) or (max_date is None) or (min_date == max_date):
         return 0
 
-    total_profit = trades["profit_abs"] / starting_balance
-    days_period = max(1, (max_date - min_date).days)
+    daily_returns = calculate_daily_returns(trades, min_date, max_date, starting_balance)
 
-    expected_returns_mean = total_profit.sum() / days_period
-    up_stdev = np.std(total_profit)
+    up_stdev = daily_returns.std()
 
-    if up_stdev != 0:
-        sharp_ratio = expected_returns_mean / up_stdev * np.sqrt(365)
+    if up_stdev != 0 and not np.isnan(up_stdev):
+        return daily_returns.mean() / up_stdev * np.sqrt(365)
     else:
-        # Define high (negative) sharpe ratio to be clear that this is NOT optimal.
-        sharp_ratio = -100
-
-    # print(expected_returns_mean, up_stdev, sharp_ratio)
-    return sharp_ratio
+        return -100
 
 
 def calculate_calmar(
-    trades: pd.DataFrame,
-    min_date: datetime | None,
-    max_date: datetime | None,
-    starting_balance: float,
+    trades: pd.DataFrame, min_date: datetime, max_date: datetime, starting_balance: float
 ) -> float:
     """
-    Calculate calmar
+    Calculate calmar using standard CAGR / Max Drawdown formula.
     :param trades: DataFrame containing trades (requires columns close_date and profit_abs)
     :return: calmar
     """
     if (len(trades) == 0) or (min_date is None) or (max_date is None) or (min_date == max_date):
         return 0
 
-    total_profit = trades["profit_abs"].sum() / starting_balance
     days_period = max(1, (max_date - min_date).days)
+    total_profit = trades["profit_abs"].sum()
+    final_balance = starting_balance + total_profit
 
-    # adding slippage of 0.1% per trade
-    # total_profit = total_profit - 0.0005
-    expected_returns_mean = total_profit / days_period * 100
+    cagr = calculate_cagr(days_period, starting_balance, final_balance)
 
-    # calculate max drawdown
+    # Calculate max drawdown
     try:
         drawdown = calculate_max_drawdown(
             trades, value_col="profit_abs", starting_balance=starting_balance
@@ -424,13 +427,12 @@ def calculate_calmar(
     except ValueError:
         max_drawdown = 0
 
+    # Standard Calmar formula: CAGR / Max Drawdown
     if max_drawdown != 0:
-        calmar_ratio = expected_returns_mean / max_drawdown * math.sqrt(365)
+        calmar_ratio = cagr / max_drawdown
     else:
-        # Define high (negative) calmar ratio to be clear that this is NOT optimal.
         calmar_ratio = -100
 
-    # print(expected_returns_mean, max_drawdown, calmar_ratio)
     return calmar_ratio
 
 
