@@ -11,6 +11,7 @@ from freqtrade.exceptions import OperationalException
 from freqtrade.loggers.buffering_handler import FTBufferingHandler
 from freqtrade.loggers.ft_rich_handler import FtRichHandler
 from freqtrade.loggers.rich_console import get_rich_console
+from freqtrade.loggers.sensitive_filter import patch_logging
 
 
 # from freqtrade.loggers.std_err_stream_handler import FTStdErrStreamHandler
@@ -231,3 +232,6 @@ def setup_logging(config: Config) -> None:
     logging.root.setLevel(logging.INFO if verbosity < 1 else logging.DEBUG)
 
     logger.info("Verbosity set to %s", verbosity)
+
+    # Add sensitive data filter to all handlers and install LogRecordFactory
+    patch_logging()
