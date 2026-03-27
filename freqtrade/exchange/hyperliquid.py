@@ -41,6 +41,7 @@ class Hyperliquid(Exchange):
         "funding_fee_candle_limit": 500,
         "uses_leverage_tiers": False,
         "mark_ohlcv_price": "futures",
+        "funding_fee_timeframe": "1h",
     }
 
     _supported_trading_mode_margin_pairs: list[tuple[TradingMode, MarginMode]] = [
