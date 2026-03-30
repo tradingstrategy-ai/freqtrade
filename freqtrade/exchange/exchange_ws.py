@@ -165,23 +165,26 @@ class ExchangeWS:
         to a specific local IP address. This replaces the need for a custom ccxt
         fork — standard upstream ccxt does not support local_addr natively.
 
-        Must be called AFTER the exchange's async session is opened (i.e., after
-        the first WS connection attempt), or we patch open() to inject it.
+        Patches open() so that when ccxt creates its session (guarded by
+        `self.session is None`), the TCPConnector includes local_addr.
+        The patch only acts on the first call (when session is actually created)
+        to avoid leaking connectors on subsequent no-op open() calls.
         """
         original_open = exchange.open
 
         def patched_open(*args, **kwargs):
+            session_existed = exchange.session is not None
             result = original_open(*args, **kwargs)
-            # Replace the connector with one bound to our IP
-            if hasattr(exchange, 'tcp_connector') and exchange.tcp_connector is not None:
-                exchange.tcp_connector.close()
-            exchange.tcp_connector = aiohttp.TCPConnector(
-                ssl=exchange.ssl_context if hasattr(exchange, 'ssl_context') else None,
-                enable_cleanup_closed=True,
-                local_addr=(ip, 0),
-            )
-            if hasattr(exchange, 'session') and exchange.session is not None:
+            # Only patch the connector on the first open() when session is created
+            if not session_existed and exchange.session is not None:
+                old_connector = exchange.tcp_connector
+                exchange.tcp_connector = aiohttp.TCPConnector(
+                    ssl=exchange.ssl_context if hasattr(exchange, 'ssl_context') else None,
+                    local_addr=(ip, 0),
+                )
                 exchange.session._connector = exchange.tcp_connector
+                if old_connector is not None:
+                    asyncio.ensure_future(old_connector.close())
             return result
 
         exchange.open = patched_open
