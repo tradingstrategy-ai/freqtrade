@@ -286,6 +286,16 @@ class Exchange:
             exchange_conf.get("ccxt_async_config", {}), ccxt_async_config
         )
         self._api_async = self._init_ccxt(exchange_conf, False, ccxt_async_config)
+
+        # Bind async REST to the first IP in the pool so startup REST calls
+        # (load_markets, fetch_ohlcv for startup candles) don't all share the
+        # system default IP. Each bot gets its own IP, preventing 429s when
+        # multiple bots restart simultaneously.
+        _ip_pool = exchange_conf.get('websocket_ip_pool', [])
+        if _ip_pool:
+            ExchangeWS._patch_ccxt_local_addr(self._api_async, _ip_pool[0])
+            logger.info(f"[REST-IP] Bound async REST API to {_ip_pool[0]}")
+
         _has_watch_ohlcv = self.exchange_has("watchOHLCV") and self._ft_has["ws_enabled"]
         if (
             self._config["runmode"] in TRADE_MODES
@@ -2992,7 +3002,13 @@ class Exchange:
                 if candle_type and candle_type not in (CandleType.SPOT, CandleType.FUTURES):
                     self.verify_candle_type_support(candle_type)
                     params.update({"price": str(candle_type)})
-                data = await self._api_async.fetch_ohlcv(
+                # Use IP-distributed REST exchange if available, otherwise default
+                rest_api = self._api_async
+                if self._exchange_ws:
+                    ip_rest = self._exchange_ws.get_rest_exchange_for_pair(pair)
+                    if ip_rest is not None:
+                        rest_api = ip_rest
+                data = await rest_api.fetch_ohlcv(
                     pair, timeframe=timeframe, since=since_ms, limit=candle_limit, params=params
                 )
             else:

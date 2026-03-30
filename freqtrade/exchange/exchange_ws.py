@@ -352,13 +352,15 @@ class ExchangeWS:
         """Get REST-specific exchange for this pair's IP (separate from WebSocket).
 
         Creates instances lazily in main thread to bind to main event loop.
-        This avoids "Future attached to different loop" errors that occur when
-        REST and WebSocket share the same CCXT instances.
+        Auto-assigns pair to an IP if not already assigned, so REST calls
+        during startup (before WS subscribes) are also distributed.
         """
         if not self._ip_pool:
             return None
 
         ip = self._pair_ip_assignment.get(pair)
+        if not ip:
+            ip = self.assign_pair_to_ip(pair)
         if not ip:
             return None
 
