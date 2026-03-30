@@ -366,7 +366,7 @@ class ExchangeWS:
 
         # Lazy creation ensures binding to main thread's event loop
         if ip not in self._rest_exchanges:
-            logger.debug(f"[REST-EXCHANGE] Creating REST instance for IP {ip}")
+            logger.info(f"[REST-EXCHANGE] Creating REST instance for IP {ip}")
             self._rest_exchanges[ip] = self._create_single_ws_exchange(ip)
 
         return self._rest_exchanges.get(ip)
