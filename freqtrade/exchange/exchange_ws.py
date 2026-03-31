@@ -159,6 +159,28 @@ class ExchangeWS:
         self._last_hourly_log: float = 0
 
     @staticmethod
+    def _patch_ccxt_sync_local_addr(exchange, ip: str) -> None:
+        """
+        Bind a ccxt sync exchange's requests.Session to a specific local IP.
+        Uses a custom HTTPAdapter with urllib3's source_address support.
+        """
+        from requests.adapters import HTTPAdapter
+        from urllib3 import PoolManager
+
+        class SourceAddressAdapter(HTTPAdapter):
+            def __init__(self, source_address, **kwargs):
+                self._source_address = source_address
+                super().__init__(**kwargs)
+
+            def init_poolmanager(self, *args, **kwargs):
+                kwargs['source_address'] = self._source_address
+                super().init_poolmanager(*args, **kwargs)
+
+        adapter = SourceAddressAdapter(source_address=(ip, 0))
+        exchange.session.mount('https://', adapter)
+        exchange.session.mount('http://', adapter)
+
+    @staticmethod
     def _patch_ccxt_local_addr(exchange: ccxt.Exchange, ip: str) -> None:
         """
         Monkey-patch a ccxt async exchange instance to bind its TCP connections
@@ -352,19 +374,21 @@ class ExchangeWS:
         """Get REST-specific exchange for this pair's IP (separate from WebSocket).
 
         Creates instances lazily in main thread to bind to main event loop.
-        This avoids "Future attached to different loop" errors that occur when
-        REST and WebSocket share the same CCXT instances.
+        Auto-assigns pair to an IP if not already assigned, so REST calls
+        during startup (before WS subscribes) are also distributed.
         """
         if not self._ip_pool:
             return None
 
         ip = self._pair_ip_assignment.get(pair)
         if not ip:
+            ip = self.assign_pair_to_ip(pair)
+        if not ip:
             return None
 
         # Lazy creation ensures binding to main thread's event loop
         if ip not in self._rest_exchanges:
-            logger.debug(f"[REST-EXCHANGE] Creating REST instance for IP {ip}")
+            logger.info(f"[REST-EXCHANGE] Creating REST instance for IP {ip}")
             self._rest_exchanges[ip] = self._create_single_ws_exchange(ip)
 
         return self._rest_exchanges.get(ip)
