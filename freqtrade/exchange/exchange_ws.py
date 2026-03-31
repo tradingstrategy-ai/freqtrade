@@ -159,6 +159,28 @@ class ExchangeWS:
         self._last_hourly_log: float = 0
 
     @staticmethod
+    def _patch_ccxt_sync_local_addr(exchange, ip: str) -> None:
+        """
+        Bind a ccxt sync exchange's requests.Session to a specific local IP.
+        Uses a custom HTTPAdapter with urllib3's source_address support.
+        """
+        from requests.adapters import HTTPAdapter
+        from urllib3 import PoolManager
+
+        class SourceAddressAdapter(HTTPAdapter):
+            def __init__(self, source_address, **kwargs):
+                self._source_address = source_address
+                super().__init__(**kwargs)
+
+            def init_poolmanager(self, *args, **kwargs):
+                kwargs['source_address'] = self._source_address
+                super().init_poolmanager(*args, **kwargs)
+
+        adapter = SourceAddressAdapter(source_address=(ip, 0))
+        exchange.session.mount('https://', adapter)
+        exchange.session.mount('http://', adapter)
+
+    @staticmethod
     def _patch_ccxt_local_addr(exchange: ccxt.Exchange, ip: str) -> None:
         """
         Monkey-patch a ccxt async exchange instance to bind its TCP connections
