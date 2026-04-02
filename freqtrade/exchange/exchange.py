@@ -3002,15 +3002,20 @@ class Exchange:
                 if candle_type and candle_type not in (CandleType.SPOT, CandleType.FUTURES):
                     self.verify_candle_type_support(candle_type)
                     params.update({"price": str(candle_type)})
-                # Use IP-distributed REST exchange if available, otherwise default
-                rest_api = self._api_async
-                if self._exchange_ws:
-                    ip_rest = self._exchange_ws.get_rest_exchange_for_pair(pair)
-                    if ip_rest is not None:
-                        rest_api = ip_rest
-                data = await rest_api.fetch_ohlcv(
-                    pair, timeframe=timeframe, since=since_ms, limit=candle_limit, params=params
-                )
+                if self._exchange_ws and self._exchange_ws.has_ip_pool():
+                    data = await self._exchange_ws.fetch_rest_ohlcv_for_pair(
+                        pair,
+                        timeframe,
+                        since_ms,
+                        candle_limit,
+                        params,
+                        fallback_exchange=self._api_async,
+                    )
+                else:
+                    data = await self._api_async.fetch_ohlcv(
+                        pair, timeframe=timeframe, since=since_ms, limit=candle_limit,
+                        params=params
+                    )
             else:
                 # Funding rate
                 data = await self._fetch_funding_rate_history(

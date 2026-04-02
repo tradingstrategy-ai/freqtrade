@@ -228,3 +228,59 @@ async def test_exchangews_get_ohlcv(mocker, caplog):
     assert log_has_re(msg, caplog)
 
     exchange_ws.cleanup()
+
+
+async def test_exchangews_fetch_rest_ohlcv_for_pair_limits_per_ip(mocker):
+    config = MagicMock()
+    ccxt_object = MagicMock()
+    mocker.patch("freqtrade.exchange.exchange_ws.ExchangeWS._start_forever", MagicMock())
+
+    active_calls = 0
+    max_active_calls = 0
+
+    async def fetch_ohlcv(*args, **kwargs):
+        nonlocal active_calls, max_active_calls
+        active_calls += 1
+        max_active_calls = max(max_active_calls, active_calls)
+        await asyncio.sleep(0.05)
+        active_calls -= 1
+        return [[1635840000000, 100, 200, 300, 400, 500]]
+
+    rest_exchange = MagicMock()
+    rest_exchange.fetch_ohlcv = AsyncMock(side_effect=fetch_ohlcv)
+
+    create_exchange = mocker.patch(
+        "freqtrade.exchange.exchange_ws.ExchangeWS._create_single_ws_exchange",
+        return_value=rest_exchange,
+    )
+
+    exchange_ws = ExchangeWS(
+        config,
+        ccxt_object,
+        exchange_config={
+            "websocket_ip_pool": ["1.1.1.1"],
+            "rest_ip_concurrency_limit": 2,
+        },
+    )
+
+    try:
+        tasks = [
+            exchange_ws.fetch_rest_ohlcv_for_pair(
+                f"PAIR{i}/USDT",
+                "1m",
+                None,
+                500,
+                {},
+            )
+            for i in range(5)
+        ]
+
+        results = await asyncio.gather(*tasks)
+
+        assert len(results) == 5
+        assert all(result[0][0] == 1635840000000 for result in results)
+        assert max_active_calls == 2
+        assert rest_exchange.fetch_ohlcv.await_count == 5
+        assert create_exchange.call_count == 2
+    finally:
+        exchange_ws.cleanup()

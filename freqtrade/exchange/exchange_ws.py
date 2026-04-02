@@ -90,6 +90,15 @@ class ExchangeWS:
         # Track (timestamp, weight) tuples per IP for sliding window calculation
         self._ip_weight_history: dict[str, list[tuple[float, int]]] = defaultdict(list)
 
+        # Limit concurrent REST fallbacks per IP so startup/reconnect bursts do not
+        # overwhelm a single ccxt instance and bypass its sequential rate limiter.
+        _rest_limit = exchange_config.get('rest_ip_concurrency_limit')
+        self._rest_ip_concurrency_limit: int | None = (
+            max(1, int(_rest_limit)) if _rest_limit is not None else None
+        )
+        self._rest_ip_semaphores: dict[str, asyncio.Semaphore] = {}
+        self._rest_ip_inflight: dict[str, int] = defaultdict(int)
+
         # Create dedicated CCXT exchange instances for each IP
         self._ws_exchanges: dict[str, ccxt.Exchange] = {}
         # Separate REST exchange instances per IP (created lazily in main thread)
@@ -392,6 +401,84 @@ class ExchangeWS:
             self._rest_exchanges[ip] = self._create_single_ws_exchange(ip)
 
         return self._rest_exchanges.get(ip)
+
+    def has_ip_pool(self) -> bool:
+        """Return whether this exchange websocket helper is using an IP pool."""
+        return bool(self._ip_pool)
+
+    def _get_rest_ip_semaphore(self, ip: str) -> asyncio.Semaphore:
+        """Get or create the per-IP REST concurrency limiter."""
+        if self._rest_ip_concurrency_limit is None:
+            raise RuntimeError("REST IP concurrency limiter is disabled.")
+        if ip not in self._rest_ip_semaphores:
+            self._rest_ip_semaphores[ip] = asyncio.Semaphore(self._rest_ip_concurrency_limit)
+        return self._rest_ip_semaphores[ip]
+
+    async def fetch_rest_ohlcv_for_pair(
+        self,
+        pair: str,
+        timeframe: str,
+        since_ms: int | None,
+        candle_limit: int,
+        params: dict,
+        fallback_exchange: ccxt.Exchange | None = None,
+    ) -> list:
+        """Fetch REST OHLCV for a pair with per-IP concurrency limiting."""
+        rest_api = self.get_rest_exchange_for_pair(pair)
+
+        if rest_api is None:
+            if fallback_exchange is None:
+                raise RuntimeError("No REST exchange available for OHLCV fetch.")
+            return await fallback_exchange.fetch_ohlcv(
+                pair,
+                timeframe=timeframe,
+                since=since_ms,
+                limit=candle_limit,
+                params=params,
+            )
+
+        ip = self._pair_ip_assignment.get(pair)
+        if not ip:
+            return await rest_api.fetch_ohlcv(
+                pair,
+                timeframe=timeframe,
+                since=since_ms,
+                limit=candle_limit,
+                params=params,
+            )
+
+        if self._rest_ip_concurrency_limit is None:
+            return await rest_api.fetch_ohlcv(
+                pair,
+                timeframe=timeframe,
+                since=since_ms,
+                limit=candle_limit,
+                params=params,
+            )
+
+        wait_started = time.monotonic()
+        semaphore = self._get_rest_ip_semaphore(ip)
+
+        async with semaphore:
+            waited_for = time.monotonic() - wait_started
+            self._rest_ip_inflight[ip] += 1
+            current_inflight = self._rest_ip_inflight[ip]
+            try:
+                if waited_for >= 0.25:
+                    logger.debug(
+                        f"[REST-LIMITER] {pair}/{timeframe} waited {waited_for:.2f}s "
+                        f"for IP {ip} slot (inflight={current_inflight}/"
+                        f"{self._rest_ip_concurrency_limit})"
+                    )
+                return await rest_api.fetch_ohlcv(
+                    pair,
+                    timeframe=timeframe,
+                    since=since_ms,
+                    limit=candle_limit,
+                    params=params,
+                )
+            finally:
+                self._rest_ip_inflight[ip] -= 1
 
     def assign_pair_to_ip(self, pair: str) -> str | None:
         """Assign a pair to an IP if not already assigned.

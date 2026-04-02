@@ -3,7 +3,7 @@ import logging
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from random import randint
-from unittest.mock import MagicMock, Mock, PropertyMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, PropertyMock, patch
 
 import ccxt
 import pytest
@@ -2995,6 +2995,34 @@ async def test__async_get_candle_history(default_conf, mocker, caplog, exchange_
         await exchange._async_get_candle_history(
             pair, "5m", CandleType.SPOT, dt_ts(dt_now() - timedelta(seconds=2000))
         )
+    exchange.close()
+
+
+async def test__async_get_candle_history_uses_exchangews_rest_limiter(default_conf, mocker):
+    ohlcv = [
+        [
+            dt_ts(),
+            1,
+            2,
+            3,
+            4,
+            5,
+        ]
+    ]
+
+    exchange = get_patched_exchange(mocker, default_conf)
+    exchange._exchange_ws = MagicMock()
+    exchange._exchange_ws.has_ip_pool.return_value = True
+    exchange._exchange_ws.fetch_rest_ohlcv_for_pair = AsyncMock(return_value=ohlcv)
+    exchange._api_async.fetch_ohlcv = AsyncMock(return_value=ohlcv)
+
+    pair = "ETH/BTC"
+    res = await exchange._async_get_candle_history(pair, "5m", CandleType.SPOT)
+
+    assert res[0] == pair
+    assert res[3] == ohlcv
+    exchange._exchange_ws.fetch_rest_ohlcv_for_pair.assert_awaited_once()
+    exchange._api_async.fetch_ohlcv.assert_not_called()
     exchange.close()
 
 
