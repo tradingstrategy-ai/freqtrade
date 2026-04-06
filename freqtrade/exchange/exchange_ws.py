@@ -61,6 +61,7 @@ class ExchangeWS:
         # IP failure tracking for recovery mechanism
         self._ip_failure_time: dict[str, float] = {}  # When IP was marked FAILED
         self._ip_consecutive_failures: dict[str, int] = {}  # Consecutive failure count per IP
+        self._ip_last_failure_event_time: dict[str, float] = {}  # Timestamp of last counted failure event
 
         # Exponential backoff tracking per IP for reconnection
         self._ip_backoff_delay: dict[str, float] = {}  # Current backoff delay per IP
@@ -928,6 +929,7 @@ class ExchangeWS:
             self._ip_consecutive_failures[ip] = 0
             self._ip_backoff_delay[ip] = 0  # Reset backoff on refresh
             self._ip_failure_time.pop(ip, None)
+            self._ip_last_failure_event_time.pop(ip, None)
 
         # Update last refresh time
         self._last_periodic_refresh = time.time()
@@ -980,6 +982,7 @@ class ExchangeWS:
                         self._ip_backoff_delay[ip] = 0  # Reset backoff on recovery
                         self._ip_session_times[ip] = current_time
                         self._ip_failure_time.pop(ip, None)
+                        self._ip_last_failure_event_time.pop(ip, None)
 
                         logger.info(f"[IP-RECOVERY] IP {ip} recovered")
 
@@ -1012,7 +1015,22 @@ class ExchangeWS:
         Handle failure of an IP in pair distribution mode.
         Uses threshold (3 consecutive failures) before marking as FAILED.
         Failed IPs can recover after 5 minute cooldown.
+
+        Failures are de-duplicated by a 5-second window: multiple WS callbacks
+        from a single disconnect event all fire within milliseconds and must not
+        each count as a separate failure — only one failure event is counted per
+        5-second window per IP.
         """
+        now = time.monotonic()
+        last_event = self._ip_last_failure_event_time.get(failed_ip, 0)
+        failure_dedup_window = 5.0  # seconds
+
+        if now - last_event < failure_dedup_window:
+            # Same disconnect event — don't count again
+            return
+
+        self._ip_last_failure_event_time[failed_ip] = now
+
         # Increment consecutive failure count
         self._ip_consecutive_failures[failed_ip] = (
             self._ip_consecutive_failures.get(failed_ip, 0) + 1
