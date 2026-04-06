@@ -63,6 +63,10 @@ class ExchangeWS:
         self._ip_consecutive_failures: dict[str, int] = {}  # Consecutive failure count per IP
         self._ip_last_failure_event_time: dict[str, float] = {}  # Timestamp of last counted failure event
 
+        # WS reconnect tracking: when a 1006 fires, mark the IP as reconnecting so the
+        # OHLCV retry loop can skip straight to REST instead of waiting 30 seconds.
+        self._ip_ws_down_since: dict[str, float] = {}  # monotonic time of last 1006 per IP
+
         # Exponential backoff tracking per IP for reconnection
         self._ip_backoff_delay: dict[str, float] = {}  # Current backoff delay per IP
 
@@ -406,6 +410,18 @@ class ExchangeWS:
     def has_ip_pool(self) -> bool:
         """Return whether this exchange websocket helper is using an IP pool."""
         return bool(self._ip_pool)
+
+    def is_pair_ws_reconnecting(self, pair: str) -> bool:
+        """Return True if the WS connection for this pair's IP dropped recently.
+
+        Used by the OHLCV retry loop to skip the 30-second WS wait and fall back
+        to REST immediately after a server-side disconnect (code 1006).
+        Clears automatically when WS delivers its first message after reconnecting.
+        """
+        ip = self._pair_ip_assignment.get(pair)
+        if not ip:
+            return False
+        return ip in self._ip_ws_down_since
 
     def _get_rest_ip_semaphore(self, ip: str) -> asyncio.Semaphore:
         """Get or create the per-IP REST concurrency limiter."""
@@ -930,6 +946,7 @@ class ExchangeWS:
             self._ip_backoff_delay[ip] = 0  # Reset backoff on refresh
             self._ip_failure_time.pop(ip, None)
             self._ip_last_failure_event_time.pop(ip, None)
+            self._ip_ws_down_since.pop(ip, None)
 
         # Update last refresh time
         self._last_periodic_refresh = time.time()
@@ -983,6 +1000,7 @@ class ExchangeWS:
                         self._ip_session_times[ip] = current_time
                         self._ip_failure_time.pop(ip, None)
                         self._ip_last_failure_event_time.pop(ip, None)
+                        self._ip_ws_down_since.pop(ip, None)
 
                         logger.info(f"[IP-RECOVERY] IP {ip} recovered")
 
@@ -1317,6 +1335,9 @@ class ExchangeWS:
                 self.klines_last_refresh[(pair, timeframe, candle_type)] = dt_ts()
                 message_count += 1
 
+                # WS delivered data — clear the reconnecting flag for this IP
+                self._ip_ws_down_since.pop(assigned_ip, None)
+
                 # Track metrics
                 if assigned_ip in self._ip_metrics:
                     self._ip_metrics[assigned_ip]['candles_received'] += 1
@@ -1427,6 +1448,10 @@ class ExchangeWS:
                 })
                 ip_errors = self._ip_metrics[assigned_ip]['errors']
                 self._ip_metrics[assigned_ip]['errors'] = ip_errors[-10:]
+
+            # Mark IP as reconnecting so OHLCV retry loops skip the 30s wait
+            # and fall back to REST immediately on the next candle close.
+            self._ip_ws_down_since[assigned_ip] = time.monotonic()
 
             # Handle IP failure - mark IP as failed and allow pair redistribution
             if self._ip_pool:

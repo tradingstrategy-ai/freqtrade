@@ -2684,6 +2684,14 @@ class Exchange:
         retry_delays = [1, 1, 2, 2, 3, 3, 4, 4, 5, 5]
 
         for attempt in range(max_ws_retries):
+            # If WS just dropped (server-side 1006), skip the retry wait and fall back to
+            # REST immediately — no point polling stale cache while WS is reconnecting.
+            if self._exchange_ws.is_pair_ws_reconnecting(pair):
+                logger.info(
+                    f"[REST-FALLBACK] {pair}/{timeframe} — WS reconnecting, skipping retries"
+                )
+                return await self._async_get_candle_history(pair, timeframe, candle_type, since_ms)
+
             candles = self._exchange_ws.ohlcvs(pair, timeframe)
             last_refresh = self._exchange_ws.klines_last_refresh.get(
                 (pair, timeframe, candle_type), 0
