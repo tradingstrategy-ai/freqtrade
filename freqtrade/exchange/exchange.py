@@ -2970,7 +2970,7 @@ class Exchange:
         return plr < now
 
     @retrier_async
-    async def _async_get_candle_history(  # noqa: C901
+    async def _async_get_candle_history(
         self,
         pair: str,
         timeframe: str,
