@@ -2969,6 +2969,14 @@ class Exchange:
         now = dt_ts(timeframe_to_prev_date(timeframe))
         return plr < now
 
+    def _get_async_rest_api_for_pair(self, pair: str) -> ccxt.Exchange:
+        """Return the IP-distributed async REST exchange for this pair, or the default."""
+        if self._exchange_ws:
+            ip_rest = self._exchange_ws.get_rest_exchange_for_pair(pair)
+            if ip_rest is not None:
+                return ip_rest
+        return self._api_async
+
     @retrier_async
     async def _async_get_candle_history(
         self,
@@ -3002,13 +3010,7 @@ class Exchange:
                 if candle_type and candle_type not in (CandleType.SPOT, CandleType.FUTURES):
                     self.verify_candle_type_support(candle_type)
                     params.update({"price": str(candle_type)})
-                # Use IP-distributed REST exchange if available, otherwise default
-                rest_api = self._api_async
-                if self._exchange_ws:
-                    ip_rest = self._exchange_ws.get_rest_exchange_for_pair(pair)
-                    if ip_rest is not None:
-                        rest_api = ip_rest
-                data = await rest_api.fetch_ohlcv(
+                data = await self._get_async_rest_api_for_pair(pair).fetch_ohlcv(
                     pair, timeframe=timeframe, since=since_ms, limit=candle_limit, params=params
                 )
             else:
