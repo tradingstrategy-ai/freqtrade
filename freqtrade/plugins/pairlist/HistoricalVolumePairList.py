@@ -136,8 +136,7 @@ class HistoricalVolumePairList(IPairList):
                 "default": {},
                 "description": "Token name mapping",
                 "help": (
-                    "Map source file token names to trading"
-                    " pair names (e.g. {'kPEPE': 'KPEPE'})."
+                    "Map source file token names to trading pair names (e.g. {'kPEPE': 'KPEPE'})."
                 ),
             },
         }
@@ -195,7 +194,8 @@ class HistoricalVolumePairList(IPairList):
         candle_suffix = f"-{self._candle_type_str}" if self._candle_type_str else ""
         glob_pattern = f"*{self._pair_suffix}-1d{candle_suffix}.feather"
         files = [
-            f for f in data_dir.glob(glob_pattern)
+            f
+            for f in data_dir.glob(glob_pattern)
             if not f.is_symlink() and not f.name.startswith("XYZ-")
         ]
         resample_from_subdaily = False
@@ -203,7 +203,8 @@ class HistoricalVolumePairList(IPairList):
         if not files:
             glob_pattern = f"*{self._pair_suffix}-4h{candle_suffix}.feather"
             files = [
-                f for f in data_dir.glob(glob_pattern)
+                f
+                for f in data_dir.glob(glob_pattern)
                 if not f.is_symlink() and not f.name.startswith("XYZ-")
             ]
             resample_from_subdaily = True
@@ -285,9 +286,9 @@ class HistoricalVolumePairList(IPairList):
         # .shift(1) so day D uses D-lookback..D-1 (not D-lookback+1..D)
         # This prevents look-ahead bias: we must not include day D's volume
         # when deciding which pairs to trade on day D.
-        rolling_vol = self._volume_data.rolling(
-            window=self._lookback_days, min_periods=1
-        ).sum().shift(1)
+        rolling_vol = (
+            self._volume_data.rolling(window=self._lookback_days, min_periods=1).sum().shift(1)
+        )
 
         self._daily_rankings = {}
 
@@ -325,9 +326,7 @@ class HistoricalVolumePairList(IPairList):
         try:
             return self._filter_pairlist_inner(pairlist)
         except Exception as e:
-            logger.warning(
-                f"HistoricalVolumePairList: error filtering, passing through: {e}"
-            )
+            logger.warning(f"HistoricalVolumePairList: error filtering, passing through: {e}")
             return pairlist
 
     def _filter_pairlist_inner(self, pairlist: list[str]) -> list[str]:
@@ -355,11 +354,7 @@ class HistoricalVolumePairList(IPairList):
         # Case-insensitive matching handles k-prefix tokens (kPEPE vs KPEPE) and
         # other casing mismatches between filenames and whitelist.
         pairset_lower = {p.lower(): p for p in pairlist}
-        result = [
-            pairset_lower[rp.lower()]
-            for rp in ranked_pairs
-            if rp.lower() in pairset_lower
-        ]
+        result = [pairset_lower[rp.lower()] for rp in ranked_pairs if rp.lower() in pairset_lower]
 
         logger.info(
             f"HistoricalVolumePairList [{day_str}]: "

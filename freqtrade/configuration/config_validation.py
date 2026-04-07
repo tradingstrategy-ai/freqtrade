@@ -405,6 +405,37 @@ def _validate_consumers(conf: dict[str, Any]) -> None:
             )
 
 
+def _validate_no_raw_private_keys(conf: dict[str, Any]) -> None:
+    """
+    Reject configurations that contain raw private keys (hex strings starting with 0x).
+    Private keys must be supplied via environment variable references, not inline in config.
+    :raise: ConfigurationError if a raw private key is found
+    """
+    import re
+
+    _raw_key_pattern = re.compile(r"^0x[0-9a-fA-F]{20,}$")
+    _key_fields = ("private_key", "privateKey")
+    exchange_conf = conf.get("exchange", {})
+
+    for field in _key_fields:
+        value = exchange_conf.get(field, "")
+        if value and _raw_key_pattern.match(str(value)):
+            raise ConfigurationError(
+                f"Raw private key found in exchange.{field}. "
+                "Use an environment variable (e.g. private_key_env) instead."
+            )
+
+    for nested in ("ccxt_config", "ccxt_sync_config"):
+        nested_conf = exchange_conf.get(nested, {})
+        for field in _key_fields:
+            value = nested_conf.get(field, "")
+            if value and _raw_key_pattern.match(str(value)):
+                raise ConfigurationError(
+                    f"Raw private key found in exchange.{nested}.{field}. "
+                    "Use an environment variable (e.g. private_key_env) instead."
+                )
+
+
 def _validate_orderflow(conf: dict[str, Any]) -> None:
     if conf.get("exchange", {}).get("use_public_trades"):
         if "orderflow" not in conf:

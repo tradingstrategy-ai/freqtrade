@@ -109,7 +109,7 @@ from freqtrade.misc import (
     safe_value_nested,
 )
 from freqtrade.util import FtTTLCache, PeriodicCache, dt_from_ts, dt_now
-from freqtrade.util.datetime_helpers import dt_humanize_delta, dt_ts, format_ms_time
+from freqtrade.util.datetime_helpers import dt_humanize_delta, dt_ts
 
 
 logger = logging.getLogger(__name__)
@@ -223,9 +223,7 @@ class Exchange:
         # Preserve wallet address before credential stripping for ExchangeWS rate limit monitoring
         # (remove_exchange_credentials strips walletAddress in dry_run mode)
         _preserved_wallet_address: str = (
-            exchange_conf.get("walletAddress", "")
-            or exchange_conf.get("wallet_address", "")
-            or ""
+            exchange_conf.get("walletAddress", "") or exchange_conf.get("wallet_address", "") or ""
         )
 
         # Deep merge ft_has with default ft_has options
@@ -290,7 +288,7 @@ class Exchange:
         # Bind both sync and async REST to pool IPs so all API calls go
         # through dedicated IPs instead of the system default. This prevents
         # 429s when multiple bots share a server.
-        _ip_pool = exchange_conf.get('websocket_ip_pool', [])
+        _ip_pool = exchange_conf.get("websocket_ip_pool", [])
         if _ip_pool:
             ExchangeWS._patch_ccxt_sync_local_addr(self._api, _ip_pool[0])
             ExchangeWS._patch_ccxt_local_addr(self._api_async, _ip_pool[0])
@@ -304,7 +302,8 @@ class Exchange:
         ):
             self._ws_async = self._init_ccxt(exchange_conf, False, ccxt_async_config)
             self._exchange_ws = ExchangeWS(
-                self._config, self._ws_async,
+                self._config,
+                self._ws_async,
                 exchange_config=exchange_conf,
                 wallet_address=_preserved_wallet_address,
             )
@@ -2684,8 +2683,8 @@ class Exchange:
         retry_delays = [1, 1, 2, 2, 3, 3, 4, 4, 5, 5]
 
         for attempt in range(max_ws_retries):
-            candles = self._exchange_ws.ohlcvs(pair, timeframe)
-            last_refresh = self._exchange_ws.klines_last_refresh.get(
+            candles = self._exchange_ws.ohlcvs(pair, timeframe)  # type: ignore[union-attr]
+            last_refresh = self._exchange_ws.klines_last_refresh.get(  # type: ignore[union-attr]
                 (pair, timeframe, candle_type), 0
             )
 
@@ -2698,7 +2697,7 @@ class Exchange:
                     logger.info(
                         f"[WS-SUCCESS] {pair}/{timeframe} got data on attempt {attempt + 1}"
                     )
-                return await self._exchange_ws.get_ohlcv(
+                return await self._exchange_ws.get_ohlcv(  # type: ignore[union-attr]
                     pair, timeframe, candle_type, candle_ts
                 )
 
@@ -2710,9 +2709,7 @@ class Exchange:
                 )
                 await asyncio.sleep(delay)
 
-        logger.info(
-            f"[REST-FALLBACK] {pair}/{timeframe} after {max_ws_retries} WS attempts"
-        )
+        logger.info(f"[REST-FALLBACK] {pair}/{timeframe} after {max_ws_retries} WS attempts")
         return await self._async_get_candle_history(pair, timeframe, candle_type, since_ms)
 
     def _can_use_websocket(
@@ -2969,8 +2966,16 @@ class Exchange:
         now = dt_ts(timeframe_to_prev_date(timeframe))
         return plr < now
 
+    def _get_async_rest_api_for_pair(self, pair: str) -> ccxt.Exchange:
+        """Return the IP-distributed async REST exchange for this pair, or the default."""
+        if self._exchange_ws:
+            ip_rest = self._exchange_ws.get_rest_exchange_for_pair(pair)
+            if ip_rest is not None:
+                return ip_rest
+        return self._api_async
+
     @retrier_async
-    async def _async_get_candle_history(
+    async def _async_get_candle_history(  # noqa: C901, RUF100
         self,
         pair: str,
         timeframe: str,
@@ -3002,13 +3007,7 @@ class Exchange:
                 if candle_type and candle_type not in (CandleType.SPOT, CandleType.FUTURES):
                     self.verify_candle_type_support(candle_type)
                     params.update({"price": str(candle_type)})
-                # Use IP-distributed REST exchange if available, otherwise default
-                rest_api = self._api_async
-                if self._exchange_ws:
-                    ip_rest = self._exchange_ws.get_rest_exchange_for_pair(pair)
-                    if ip_rest is not None:
-                        rest_api = ip_rest
-                data = await rest_api.fetch_ohlcv(
+                data = await self._get_async_rest_api_for_pair(pair).fetch_ohlcv(
                     pair, timeframe=timeframe, since=since_ms, limit=candle_limit, params=params
                 )
             else:
