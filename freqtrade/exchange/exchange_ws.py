@@ -177,8 +177,8 @@ class ExchangeWS:
                 super().init_poolmanager(*args, **kwargs)
 
         adapter = SourceAddressAdapter(source_address=(ip, 0))
-        exchange.session.mount('https://', adapter)
-        exchange.session.mount('http://', adapter)
+        exchange.session.mount("https://", adapter)
+        exchange.session.mount("http://", adapter)
 
     @staticmethod
     def _patch_ccxt_local_addr(exchange: ccxt.Exchange, ip: str) -> None:
@@ -197,7 +197,7 @@ class ExchangeWS:
             if not session_existed and exchange.session is not None:
                 old_connector = exchange.tcp_connector
                 exchange.tcp_connector = aiohttp.TCPConnector(
-                    ssl=exchange.ssl_context if hasattr(exchange, 'ssl_context') else None,
+                    ssl=exchange.ssl_context if hasattr(exchange, "ssl_context") else None,
                     local_addr=(ip, 0),
                 )
                 exchange.session._connector = exchange.tcp_connector
@@ -217,21 +217,21 @@ class ExchangeWS:
         exchange_class = type(template)
 
         exchange_config = {
-            'apiKey': template.apiKey,
-            'secret': template.secret,
-            'enableRateLimit': template.enableRateLimit,
-            'rateLimit': template.rateLimit,
-            'options': {
+            "apiKey": template.apiKey,
+            "secret": template.secret,
+            "enableRateLimit": template.enableRateLimit,
+            "rateLimit": template.rateLimit,
+            "options": {
                 **template.options,
-                'local_addr': (ip, 0),
-            }
+                "local_addr": (ip, 0),
+            },
         }
 
         # Add optional credentials if present (for exchanges like Hyperliquid)
-        if hasattr(template, 'walletAddress') and template.walletAddress:
-            exchange_config['walletAddress'] = template.walletAddress
-        if hasattr(template, 'privateKey') and template.privateKey:
-            exchange_config['privateKey'] = template.privateKey
+        if hasattr(template, "walletAddress") and template.walletAddress:
+            exchange_config["walletAddress"] = template.walletAddress
+        if hasattr(template, "privateKey") and template.privateKey:
+            exchange_config["privateKey"] = template.privateKey
 
         return exchange_class(exchange_config)
 
