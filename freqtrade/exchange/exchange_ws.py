@@ -158,6 +158,55 @@ class ExchangeWS:
         # Track last hourly log time
         self._last_hourly_log: float = 0
 
+    @staticmethod
+    def _patch_ccxt_sync_local_addr(exchange, ip: str) -> None:
+        """
+        Bind a ccxt sync exchange's requests.Session to a specific local IP.
+        Used by Exchange.__init__ to bind _api (sync REST) to its pool IP.
+        CCXT's sync layer uses requests, which doesn't support local_addr natively.
+        """
+        from requests.adapters import HTTPAdapter
+
+        class SourceAddressAdapter(HTTPAdapter):
+            def __init__(self, source_address, **kwargs):
+                self._source_address = source_address
+                super().__init__(**kwargs)
+
+            def init_poolmanager(self, *args, **kwargs):
+                kwargs['source_address'] = self._source_address
+                super().init_poolmanager(*args, **kwargs)
+
+        adapter = SourceAddressAdapter(source_address=(ip, 0))
+        exchange.session.mount('https://', adapter)
+        exchange.session.mount('http://', adapter)
+
+    @staticmethod
+    def _patch_ccxt_local_addr(exchange: ccxt.Exchange, ip: str) -> None:
+        """
+        Monkey-patch a ccxt async exchange instance to bind its TCP connections
+        to a specific local IP. Used by Exchange.__init__ to bind _api_async to
+        its pool IP. Only needed for the main exchange objects — per-IP WS pool
+        instances use CCXT's native local_addr option instead (see
+        _create_single_ws_exchange).
+        """
+        original_open = exchange.open
+
+        def patched_open(*args, **kwargs):
+            session_existed = exchange.session is not None
+            result = original_open(*args, **kwargs)
+            if not session_existed and exchange.session is not None:
+                old_connector = exchange.tcp_connector
+                exchange.tcp_connector = aiohttp.TCPConnector(
+                    ssl=exchange.ssl_context if hasattr(exchange, 'ssl_context') else None,
+                    local_addr=(ip, 0),
+                )
+                exchange.session._connector = exchange.tcp_connector
+                if old_connector is not None:
+                    asyncio.ensure_future(old_connector.close())
+            return result
+
+        exchange.open = patched_open
+
     def _create_single_ws_exchange(self, ip: str) -> ccxt.Exchange:
         """Create a single CCXT exchange instance bound to a specific IP.
 
