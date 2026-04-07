@@ -109,7 +109,7 @@ from freqtrade.misc import (
     safe_value_nested,
 )
 from freqtrade.util import FtTTLCache, PeriodicCache, dt_from_ts, dt_now
-from freqtrade.util.datetime_helpers import dt_humanize_delta, dt_ts, format_ms_time
+from freqtrade.util.datetime_helpers import dt_humanize_delta, dt_ts
 
 
 logger = logging.getLogger(__name__)
@@ -2970,7 +2970,7 @@ class Exchange:
         return plr < now
 
     @retrier_async
-    async def _async_get_candle_history(
+    async def _async_get_candle_history(  # noqa: C901
         self,
         pair: str,
         timeframe: str,

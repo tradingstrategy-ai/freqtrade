@@ -508,6 +508,7 @@ class Modetrade(Exchange):
         except ccxt.BaseError as e:
             raise OperationalException(e) from e
 
+
 _DUMMY_PAIRS = [
     "1000000MOG/USDC:USDC",
     "1000APU/USDC:USDC",
