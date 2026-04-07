@@ -223,9 +223,7 @@ class Exchange:
         # Preserve wallet address before credential stripping for ExchangeWS rate limit monitoring
         # (remove_exchange_credentials strips walletAddress in dry_run mode)
         _preserved_wallet_address: str = (
-            exchange_conf.get("walletAddress", "")
-            or exchange_conf.get("wallet_address", "")
-            or ""
+            exchange_conf.get("walletAddress", "") or exchange_conf.get("wallet_address", "") or ""
         )
 
         # Deep merge ft_has with default ft_has options
@@ -290,7 +288,7 @@ class Exchange:
         # Bind both sync and async REST to pool IPs so all API calls go
         # through dedicated IPs instead of the system default. This prevents
         # 429s when multiple bots share a server.
-        _ip_pool = exchange_conf.get('websocket_ip_pool', [])
+        _ip_pool = exchange_conf.get("websocket_ip_pool", [])
         if _ip_pool:
             ExchangeWS._patch_ccxt_sync_local_addr(self._api, _ip_pool[0])
             ExchangeWS._patch_ccxt_local_addr(self._api_async, _ip_pool[0])
@@ -304,7 +302,8 @@ class Exchange:
         ):
             self._ws_async = self._init_ccxt(exchange_conf, False, ccxt_async_config)
             self._exchange_ws = ExchangeWS(
-                self._config, self._ws_async,
+                self._config,
+                self._ws_async,
                 exchange_config=exchange_conf,
                 wallet_address=_preserved_wallet_address,
             )
@@ -2710,9 +2709,7 @@ class Exchange:
                 )
                 await asyncio.sleep(delay)
 
-        logger.info(
-            f"[REST-FALLBACK] {pair}/{timeframe} after {max_ws_retries} WS attempts"
-        )
+        logger.info(f"[REST-FALLBACK] {pair}/{timeframe} after {max_ws_retries} WS attempts")
         return await self._async_get_candle_history(pair, timeframe, candle_type, since_ms)
 
     def _can_use_websocket(
@@ -2978,7 +2975,7 @@ class Exchange:
         return self._api_async
 
     @retrier_async
-    async def _async_get_candle_history(
+    async def _async_get_candle_history(  # noqa: C901, RUF100
         self,
         pair: str,
         timeframe: str,

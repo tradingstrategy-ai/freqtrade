@@ -179,9 +179,7 @@ class Modetrade(Exchange):
         """
         # If pair is marked as delisted, skip order book and use ticker only
         if pair in self._delisted_pairs:
-            logger.warning(
-                f"Pair {pair} is delisted. Using ticker pricing instead of order book."
-            )
+            logger.warning(f"Pair {pair} is delisted. Using ticker pricing instead of order book.")
             if ticker is None:
                 ticker = self.fetch_ticker(pair)
             # Use ticker-only pricing by disabling order book
@@ -190,8 +188,12 @@ class Modetrade(Exchange):
         cfg = self._modetrade_price_sanity_cfg()
         if not cfg["enabled"]:
             return super().get_rate(
-                pair, refresh, side, is_short,
-                order_book=order_book, ticker=ticker,
+                pair,
+                refresh,
+                side,
+                is_short,
+                order_book=order_book,
+                ticker=ticker,
             )
 
         # Get fresh order book price
@@ -209,8 +211,12 @@ class Modetrade(Exchange):
                     ticker = self.fetch_ticker(pair)
                 # Use ticker-only pricing
                 return super().get_rate(
-                    pair, refresh, side, is_short,
-                    order_book=None, ticker=ticker,
+                    pair,
+                    refresh,
+                    side,
+                    is_short,
+                    order_book=None,
+                    ticker=ticker,
                 )
             raise
 
@@ -235,20 +241,22 @@ class Modetrade(Exchange):
             deviation = None
 
         # Log decision
-        self._log_price_decision({
-            "pair": pair,
-            "side": side,
-            "is_short": is_short,
-            "ob_rate": ob_rate,
-            "idx": idx,
-            "mark": mark,
-            "chosen_rate": chosen_rate,
-            "action": action,
-            "deviation": deviation,
-            "max_dev": cfg["max_deviation_ratio"],
-            "ref_err": ref_err,
-            "log_level": cfg["log_level"],
-        })
+        self._log_price_decision(
+            {
+                "pair": pair,
+                "side": side,
+                "is_short": is_short,
+                "ob_rate": ob_rate,
+                "idx": idx,
+                "mark": mark,
+                "chosen_rate": chosen_rate,
+                "action": action,
+                "deviation": deviation,
+                "max_dev": cfg["max_deviation_ratio"],
+                "ref_err": ref_err,
+                "log_level": cfg["log_level"],
+            }
+        )
 
         return chosen_rate
 
@@ -265,9 +273,9 @@ class Modetrade(Exchange):
 
     def _log_price_decision(self, data: dict[str, Any]) -> None:
         """Log price sanity check decision."""
-        dev_str = f"{data['deviation']:.2%}" if data['deviation'] is not None else "N/A"
-        idx_str = f"{data['idx']:.6f}" if data['idx'] is not None else "N/A"
-        mark_str = f"{data['mark']:.6f}" if data['mark'] is not None else "N/A"
+        dev_str = f"{data['deviation']:.2%}" if data["deviation"] is not None else "N/A"
+        idx_str = f"{data['idx']:.6f}" if data["idx"] is not None else "N/A"
+        mark_str = f"{data['mark']:.6f}" if data["mark"] is not None else "N/A"
 
         msg = (
             f"ModeTrade price check: {data['action']} | "
@@ -277,10 +285,10 @@ class Modetrade(Exchange):
             f"dev={dev_str} max={data['max_dev']:.1%}"
         )
 
-        if data['ref_err']:
+        if data["ref_err"]:
             msg += f" | ref_err={data['ref_err']}"
 
-        getattr(logger, data['log_level'], logger.warning)(msg)
+        getattr(logger, data["log_level"], logger.warning)(msg)
 
     # TODO: This is a spoofed with Binance data.
     # Ask Orderly how to get.
@@ -305,8 +313,8 @@ class Modetrade(Exchange):
                 "notionalCap": "5000",
                 "notionalFloor": "0",
                 "maintMarginRatio": "0.01",
-                "cum": "0.0"
-            }
+                "cum": "0.0",
+            },
         }
 
         # leverage_tiers = self.load_leverage_tiers()
@@ -320,9 +328,7 @@ class Modetrade(Exchange):
         for pair in _DUMMY_PAIRS:
             data = spoofed_data.copy()
             data["symbol"] = pair
-            self._leverage_tiers[pair] = [
-                self.parse_leverage_tier(data)
-            ]
+            self._leverage_tiers[pair] = [self.parse_leverage_tier(data)]
 
     def validate_ordertypes(self, order_types: dict) -> None:
         """
@@ -345,14 +351,14 @@ class Modetrade(Exchange):
                 return
 
             positions = self.fetch_positions()
-            open_positions = [p for p in positions if p.get('contracts', 0) != 0]
+            open_positions = [p for p in positions if p.get("contracts", 0) != 0]
 
             if not open_positions:
                 logger.info("ModeTrade: No open positions on exchange")
                 return
 
-            whitelist = self._config.get('exchange', {}).get('pair_whitelist', [])
-            unauthorized = [p for p in open_positions if p['symbol'] not in whitelist]
+            whitelist = self._config.get("exchange", {}).get("pair_whitelist", [])
+            unauthorized = [p for p in open_positions if p["symbol"] not in whitelist]
 
             logger.info(f"ModeTrade: Found {len(open_positions)} open position(s) on exchange")
 
@@ -400,9 +406,9 @@ class Modetrade(Exchange):
         except TemporaryError as e:
             # Check if this was caused by BadSymbol
             is_bad_symbol = (
-                isinstance(e.__cause__, ccxt.BadSymbol) or
-                "BadSymbol" in str(e) or
-                "does not have market symbol" in str(e)
+                isinstance(e.__cause__, ccxt.BadSymbol)
+                or "BadSymbol" in str(e)
+                or "does not have market symbol" in str(e)
             )
 
             if is_bad_symbol:
@@ -645,5 +651,5 @@ _DUMMY_PAIRS = [
     "ZEC/USDC:USDC",
     "ZORA/USDC:USDC",
     "ZRO/USDC:USDC",
-    "0G/USDC:USDC"
+    "0G/USDC:USDC",
 ]

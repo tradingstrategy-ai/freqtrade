@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 
 
 class Aster(Exchange):
-
     _ft_has: FtHas = {
         "stoploss_on_exchange": True,
         "stop_price_param": "stopPrice",

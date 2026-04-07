@@ -95,8 +95,7 @@ class SensitiveDataFilter(logging.Filter):
                 else:
                     # Named args for %(name)s formatting - sanitize each value
                     record.args = {
-                        k: _sanitize_any(v, self._compiled_patterns)
-                        for k, v in record.args.items()
+                        k: _sanitize_any(v, self._compiled_patterns) for k, v in record.args.items()
                     }
             elif isinstance(record.args, tuple):
                 record.args = tuple(
@@ -113,6 +112,7 @@ class SensitiveDataFilter(logging.Filter):
 # ---------------------------------------------------------------------------
 # Public helpers — usable outside of the logging.Filter pathway
 # ---------------------------------------------------------------------------
+
 
 def sanitize_text(text: str, compiled_patterns: list | None = None) -> str:
     """Apply all redaction patterns to a string.
@@ -167,8 +167,7 @@ def sanitize_mime_bundle(data: dict[str, Any]) -> dict[str, Any]:
             result[mime_type] = sanitize_text(value, compiled)
         elif isinstance(value, list):
             result[mime_type] = [
-                sanitize_text(item, compiled) if isinstance(item, str) else item
-                for item in value
+                sanitize_text(item, compiled) if isinstance(item, str) else item for item in value
             ]
         else:
             result[mime_type] = value
@@ -208,6 +207,7 @@ def patch_notebook() -> None:  # noqa: C901
 
     try:
         from IPython import get_ipython
+
         ipython = get_ipython()
         if ipython is None:
             return  # Not running inside IPython/Jupyter
@@ -252,9 +252,7 @@ def patch_notebook() -> None:  # noqa: C901
         def _sanitized_publish_display_data(data, metadata=None, *, transient=None, **kwargs):
             if isinstance(data, dict):
                 data = sanitize_mime_bundle(data)
-            return _ORIGINAL_PUBLISH_DISPLAY_DATA(
-                data, metadata, transient=transient, **kwargs
-            )
+            return _ORIGINAL_PUBLISH_DISPLAY_DATA(data, metadata, transient=transient, **kwargs)
 
         _display_mod.publish_display_data = _sanitized_publish_display_data
     except (ImportError, AttributeError):
@@ -267,6 +265,7 @@ def patch_notebook() -> None:  # noqa: C901
         def _sanitized_showtraceback(*args, **kwargs):
             # Capture the traceback output by temporarily redirecting stderr
             import io
+
             buf = io.StringIO()
             old_stderr = sys.stderr
             # Temporarily bypass our stderr patch to avoid double-sanitizing
@@ -301,6 +300,7 @@ def unpatch_notebook() -> None:
 
     try:
         from IPython import get_ipython
+
         ipython = get_ipython()
         if ipython is not None:
             if _ORIGINAL_WRITE_FORMAT_DATA is not None:
@@ -313,6 +313,7 @@ def unpatch_notebook() -> None:
     if _ORIGINAL_PUBLISH_DISPLAY_DATA is not None:
         try:
             import IPython.core.display_functions as _display_mod
+
             _display_mod.publish_display_data = _ORIGINAL_PUBLISH_DISPLAY_DATA
         except (ImportError, AttributeError):
             pass
@@ -478,9 +479,7 @@ def _install_sanitizing_record_factory(original_factory) -> None:
                 # Always preserve dict shape — never convert to tuple.
                 # This handles both %(name)s named args and single-dict %s args.
                 # The handler-level Filter handles the %s-with-dict edge case.
-                record.args = {
-                    k: _sanitize_any(v, compiled) for k, v in record.args.items()
-                }
+                record.args = {k: _sanitize_any(v, compiled) for k, v in record.args.items()}
             elif isinstance(record.args, tuple):
                 record.args = tuple(_sanitize_any(a, compiled) for a in record.args)
         # Sanitize exception text — this is what _rpc_get_logs reads from
