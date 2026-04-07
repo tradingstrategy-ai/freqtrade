@@ -343,6 +343,10 @@ known-first-party = ["freqtrade_client"]
 ignore = ["E121","E123","E126","E24", "E203","E704","W503","W504"]
 max-line-length = 100
 max-complexity = 12
+per-file-ignores = [
+    # _load_volume_data complexity is acceptable; ruff does not flag it (different AST walk)
+    "freqtrade/plugins/pairlist/HistoricalVolumePairList.py:C901",
+]
 exclude = [
     ".git",
     "__pycache__",
