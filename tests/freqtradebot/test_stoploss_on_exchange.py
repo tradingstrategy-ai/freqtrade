@@ -1123,7 +1123,11 @@ def test_execute_trade_exit_sloe_cancel_exception(
         trade=trade, limit=1234, exit_check=ExitCheckTuple(exit_type=ExitType.STOP_LOSS)
     )
     assert create_order_mock.call_count == 2
-    assert log_has("Could not cancel stoploss order abcd for pair ETH/USDT", caplog)
+    assert log_has(
+        "Could not cancel stoploss order abcd for pair ETH/USDT"
+        " — order no longer exists on exchange, marking as canceled",
+        caplog,
+    )
 
 
 @pytest.mark.parametrize("is_short", [False, True])
@@ -1264,8 +1268,8 @@ def test_handle_stoploss_on_exchange_zombie_order(
     so it doesn't accumulate as a zombie and block the trading loop on
     every subsequent cycle with ~35s of retry backoff.
     """
-    stop_order_dict = {"id": "13434334"}
-    stoploss = MagicMock(return_value=stop_order_dict)
+    # First call returns the zombie order id, second call (replacement) returns a new id
+    stoploss = MagicMock(side_effect=[{"id": "13434334"}, {"id": "99999999"}])
     enter_order = limit_order[entry_side(is_short)]
     patch_RPCManager(mocker)
     patch_exchange(mocker)

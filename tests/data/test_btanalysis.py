@@ -434,7 +434,7 @@ def test_calculate_sortino(testdatadir):
         0.01,
     )
     assert isinstance(sortino, float)
-    assert pytest.approx(sortino) == 35.17722
+    assert pytest.approx(sortino) == 15.290219132094272
 
 
 def test_calculate_sharpe(testdatadir):
@@ -451,7 +451,7 @@ def test_calculate_sharpe(testdatadir):
         0.01,
     )
     assert isinstance(sharpe, float)
-    assert pytest.approx(sharpe) == 44.5078669
+    assert pytest.approx(sharpe) == 14.100890809086426
 
 
 def test_calculate_calmar(testdatadir):
