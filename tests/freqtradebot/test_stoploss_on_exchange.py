@@ -1307,9 +1307,7 @@ def test_handle_stoploss_on_exchange_zombie_order(
     # The zombie order should now be marked as canceled
     assert zombie_order.ft_is_open is False
     assert zombie_order.status == "canceled"
-    assert log_has_re(
-        r"Unable to fetch stoploss order .* — marking as stale: .*", caplog
-    )
+    assert log_has_re(r"Unable to fetch stoploss order .* — marking as stale: .*", caplog)
 
     # A new stoploss should have been created to replace it
     assert trade.has_open_sl_orders is True
@@ -1361,6 +1359,4 @@ def test_cancel_stoploss_on_exchange_zombie_order(
     # The zombie order should be marked canceled
     assert zombie_order.ft_is_open is False
     assert zombie_order.status == "canceled"
-    assert log_has_re(
-        r"Could not cancel stoploss order .* — order no longer exists.*", caplog
-    )
+    assert log_has_re(r"Could not cancel stoploss order .* — order no longer exists.*", caplog)
