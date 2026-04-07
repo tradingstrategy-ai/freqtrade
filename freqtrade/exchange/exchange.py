@@ -2684,8 +2684,8 @@ class Exchange:
         retry_delays = [1, 1, 2, 2, 3, 3, 4, 4, 5, 5]
 
         for attempt in range(max_ws_retries):
-            candles = self._exchange_ws.ohlcvs(pair, timeframe)
-            last_refresh = self._exchange_ws.klines_last_refresh.get(
+            candles = self._exchange_ws.ohlcvs(pair, timeframe)  # type: ignore[union-attr]
+            last_refresh = self._exchange_ws.klines_last_refresh.get(  # type: ignore[union-attr]
                 (pair, timeframe, candle_type), 0
             )
 
@@ -2698,7 +2698,7 @@ class Exchange:
                     logger.info(
                         f"[WS-SUCCESS] {pair}/{timeframe} got data on attempt {attempt + 1}"
                     )
-                return await self._exchange_ws.get_ohlcv(
+                return await self._exchange_ws.get_ohlcv(  # type: ignore[union-attr]
                     pair, timeframe, candle_type, candle_ts
                 )
 

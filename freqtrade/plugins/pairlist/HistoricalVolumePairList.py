@@ -176,7 +176,7 @@ class HistoricalVolumePairList(IPairList):
             return f"{ticker}/{sc}:{sc}"
         return f"{ticker}/{sc}"
 
-    def _load_volume_data(self) -> None:
+    def _load_volume_data(self) -> None:  # noqa: C901
         """Load daily candle feather files and compute quoteVolume. Called once lazily."""
         if self._volume_data is not None:
             return

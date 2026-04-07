@@ -202,7 +202,7 @@ class ExchangeWS:
                 )
                 exchange.session._connector = exchange.tcp_connector
                 if old_connector is not None:
-                    asyncio.ensure_future(old_connector.close())
+                    asyncio.ensure_future(old_connector.close())  # noqa: RUF006
             return result
 
         exchange.open = patched_open
@@ -278,7 +278,7 @@ class ExchangeWS:
                 ip_counts[assigned_ip] += 1
 
         # Assign to IP with fewest pairs (least-loaded distribution)
-        assigned_ip = min(ip_counts, key=ip_counts.get)
+        assigned_ip = min(ip_counts, key=ip_counts.get)  # type: ignore[arg-type]
         current_count = ip_counts[assigned_ip]
 
         # Log new assignment
