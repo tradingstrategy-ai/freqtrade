@@ -815,8 +815,9 @@ def test_handle_stoploss_on_exchange_trailing_error(
 
     # Still try to create order
     assert stoploss.call_count == 1
-    # TODO: Is this actually correct ? This will create a new order every time,
-    assert len(trade.open_sl_orders) == 2
+    # Old order was marked canceled by the InvalidOrderException handler,
+    # new order was created - only 1 open SL order remains
+    assert len(trade.open_sl_orders) == 1
 
     # Fail creating stoploss order
     caplog.clear()
@@ -824,7 +825,8 @@ def test_handle_stoploss_on_exchange_trailing_error(
     mocker.patch.object(freqtrade.exchange, "create_stoploss", side_effect=ExchangeError())
     time_machine.shift(timedelta(minutes=50))
     freqtrade.handle_trailing_stoploss_on_exchange(trade, stoploss_order_hanging)
-    assert cancel_mock.call_count == 2
+    # Only 1 open SL order remains (zombie was marked canceled in previous call)
+    assert cancel_mock.call_count == 1
     assert log_has_re(r"Could not create trailing stoploss order for pair ETH/USDT\..*", caplog)
 
 

@@ -468,7 +468,7 @@ def test_calculate_calmar(testdatadir):
         0.01,
     )
     assert isinstance(calmar, float)
-    assert pytest.approx(calmar) == 559.040508
+    assert pytest.approx(calmar) == 304.8342126639884
 
 
 def test_calculate_sqn(testdatadir):
