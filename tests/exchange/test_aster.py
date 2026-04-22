@@ -40,9 +40,7 @@ def test_set_margin_mode_other_errors_still_raise(mocker, default_conf):
     """Non-NoChange TemporaryErrors must still propagate."""
     exchange, api_mock = _make_aster(mocker, default_conf)
 
-    api_mock.set_margin_mode = MagicMock(
-        side_effect=ccxt.OperationRejected("Some other rejection")
-    )
+    api_mock.set_margin_mode = MagicMock(side_effect=ccxt.OperationRejected("Some other rejection"))
 
     with pytest.raises(TemporaryError):
         exchange.set_margin_mode("BTC/USDT:USDT", MarginMode.ISOLATED)
