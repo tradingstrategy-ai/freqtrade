@@ -86,6 +86,33 @@ class Aster(Exchange):
             return self._config.get("proxy_coin", self._config["stake_currency"])
         return self._config["stake_currency"]
 
+    def set_margin_mode(
+        self,
+        pair: str,
+        margin_mode: MarginMode,
+        accept_fail: bool = False,
+        params: dict | None = None,
+    ):
+        """
+        Set the margin mode for a pair on Aster.
+
+        Overrides the base implementation to treat Aster's -4046 "No need to change
+        margin type" response as a no-op rather than a fatal error. Aster always returns
+        this code when the margin mode is already set to the requested value, which is the
+        normal state for any pair the bot has previously traded.
+        """
+        try:
+            super().set_margin_mode(pair, margin_mode, accept_fail=accept_fail, params=params)
+        except TemporaryError as e:
+            if "NoChange" in str(e) or "No need to change margin type" in str(e):
+                # Aster returns code -4046 when the margin mode is already correctly set.
+                # This is expected on repeated trades on the same pair — not an error.
+                logger.debug(
+                    "Aster: margin mode already set correctly for %s (NoChange), continuing.", pair
+                )
+                return
+            raise
+
     def get_tickers(
         self,
         symbols: list[str] | None = None,
