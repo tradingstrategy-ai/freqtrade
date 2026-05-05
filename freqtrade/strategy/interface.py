@@ -350,6 +350,19 @@ class IStrategy(ABC, HyperStrategyMixin):
             pair=pair, trade=trade, order=order, current_time=current_time
         )
 
+    def get_entry_order_type(self, entry_tag: str | None) -> str:
+        """
+        Return the order type to use for a given entry tag.
+
+        Override this in a strategy or orchestrator to return per-strategy order types
+        based on the entry_tag prefix (e.g. "meanrev|" → "limit", others → "market").
+        The default implementation returns the globally configured entry order type.
+
+        :param entry_tag: The entry tag string (e.g. "meanrev|entry"), or None.
+        :return str: Order type string — "limit" or "market".
+        """
+        return self.order_types["entry"]
+
     def confirm_trade_entry(
         self,
         pair: str,

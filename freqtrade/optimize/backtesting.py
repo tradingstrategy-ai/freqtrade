@@ -1090,7 +1090,7 @@ class Backtesting:
         current_time = row[DATE_IDX].to_pydatetime()
         entry_tag = entry_tag1 or (row[ENTER_TAG_IDX] if len(row) >= ENTER_TAG_IDX + 1 else None)
         # let's call the custom entry price, using the open price as default price
-        order_type = self.strategy.order_types["entry"]
+        order_type = self.strategy.get_entry_order_type(entry_tag)
         pos_adjust = trade is not None and requested_rate is None
 
         stake_amount_ = stake_amount or (trade.stake_amount if trade else 0.0)
