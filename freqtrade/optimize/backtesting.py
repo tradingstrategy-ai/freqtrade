@@ -4,6 +4,7 @@
 This module contains the backtesting logic
 """
 
+import json
 import logging
 from collections import defaultdict
 from copy import deepcopy
@@ -90,6 +91,7 @@ SHORT_IDX = 7
 ESHORT_IDX = 8  # Exit short
 ENTER_TAG_IDX = 9
 EXIT_TAG_IDX = 10
+PHASE1_NETTING_INTENTS_IDX = 11
 
 # Every change to this headers list must evaluate further usages of the resulting tuple
 # and eventually change the constants for indexes at the top
@@ -105,6 +107,7 @@ HEADERS = [
     "exit_short",
     "enter_tag",
     "exit_tag",
+    "phase1_netting_intents",
 ]
 
 
@@ -1074,11 +1077,14 @@ class Backtesting:
         requested_rate: float | None = None,
         requested_stake: float | None = None,
         entry_tag1: str | None = None,
+        skip_phase1: bool = False,
     ) -> LocalTrade | None:
         """
         :param trade: Trade to adjust - initial entry if None
         :param requested_rate: Adjusted entry rate
         :param requested_stake: Stake amount for adjusted orders (`adjust_entry_price`).
+        :param skip_phase1: When True, skip secondary intent re-processing. Used by the
+            secondary dispatch loop so each intent-opened trade does not recurse.
         """
 
         current_time = row[DATE_IDX].to_pydatetime()
@@ -1491,6 +1497,42 @@ class Backtesting:
                     self.wallets.update()
             else:
                 self._collate_rejected(pair, row)
+
+        # 2b. Secondary intent dispatch — multi-signal same-candle entry.
+        # The orchestrator serialises non-primary strategy signals into
+        # phase1_netting_intents as a JSON array. With position_stacking=True,
+        # opening N independent trades on the same pair on the same candle is
+        # valid. Each intent produces a fully independent LocalTrade with its
+        # own enter_tag, exit logic, and P&L attribution.
+        if can_enter and self._position_stacking:
+            multi_intents_raw = (
+                row[PHASE1_NETTING_INTENTS_IDX]
+                if len(row) > PHASE1_NETTING_INTENTS_IDX
+                else None
+            )
+            if multi_intents_raw and isinstance(multi_intents_raw, str):
+                try:
+                    intents = json.loads(multi_intents_raw)
+                except (ValueError, TypeError):
+                    intents = []
+                for intent in intents:
+                    i_direction: LongShort = (
+                        "long" if intent.get("direction") == "long" else "short"
+                    )
+                    if PairLocks.is_pair_locked(pair, row[DATE_IDX], i_direction):
+                        continue
+                    if not self.trade_slot_available(LocalTrade.bt_open_open_trade_count):
+                        self._collate_rejected(pair, row)
+                        break
+                    trade_i = self._enter_trade(
+                        pair,
+                        row,
+                        i_direction,
+                        entry_tag1=intent.get("tag"),
+                        skip_phase1=True,
+                    )
+                    if trade_i:
+                        self.wallets.update()
 
         for trade in list(LocalTrade.bt_trades_open_pp[pair]):
             # 3. Process entry orders.
