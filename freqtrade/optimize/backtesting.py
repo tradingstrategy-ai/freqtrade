@@ -1572,6 +1572,7 @@ class Backtesting:
         detail_data.loc[:, "exit_short"] = row[ESHORT_IDX]
         detail_data.loc[:, "enter_tag"] = row[ENTER_TAG_IDX]
         detail_data.loc[:, "exit_tag"] = row[EXIT_TAG_IDX]
+        detail_data.loc[:, "phase1_netting_intents"] = None
         return detail_data[HEADERS].values.tolist()
 
     def _time_generator(self, start_date: datetime, end_date: datetime):
@@ -1909,7 +1910,7 @@ class Backtesting:
                 )
 
         # Results may be mixed up now. Sort them so they follow --strategy-list order.
-        if "strategy_list" in self.config and len(self.results) > 0:
+        if "strategy_list" in self.config and len(self.config["strategy_list"]) > 0 and len(self.results) > 0:
             self.results["strategy_comparison"] = sorted(
                 self.results["strategy_comparison"],
                 key=lambda c: self.config["strategy_list"].index(c["key"]),
