@@ -2,12 +2,15 @@ import asyncio
 import logging
 import threading
 from datetime import timedelta
+from types import SimpleNamespace
 from time import sleep
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from ccxt import NotSupported
 
 from freqtrade.enums import CandleType
+from freqtrade.exchange.exchange import Exchange
 from freqtrade.exchange.exchange_ws import ExchangeWS
 from ft_client.test_client.test_rest_client import log_has_re
 
@@ -158,6 +161,153 @@ async def test_exchangews_ohlcv(mocker, time_machine, caplog):
     finally:
         # Cleanup
         exchange_ws.cleanup()
+
+
+async def test_ip_pool_fallback_failure_is_ignored(mocker, caplog):
+    config = {"exchange": {"websocket_ip_pool": ["127.0.0.2"]}}
+    ccxt_object = MagicMock()
+    mocker.patch("freqtrade.exchange.exchange_ws.ExchangeWS._start_forever", MagicMock())
+    mocker.patch(
+        "freqtrade.exchange.exchange_ws.ExchangeWS._create_ws_exchange_pool",
+        return_value={"127.0.0.2": ccxt_object},
+    )
+    caplog.set_level(logging.WARNING)
+
+    exchange_ws = ExchangeWS(config, ccxt_object)
+    try:
+        await exchange_ws._handle_ip_failure("default", "BTC/USDT:USDT")
+    finally:
+        exchange_ws.cleanup()
+
+    assert exchange_ws._ip_consecutive_failures == {}
+    assert log_has_re("Ignoring failure for untracked fallback IP default", caplog)
+
+
+def test_ws_scheduled_refresh_default_depends_on_pool_size(mocker):
+    ccxt_object = MagicMock()
+    mocker.patch("freqtrade.exchange.exchange_ws.ExchangeWS._start_forever", MagicMock())
+    mocker.patch(
+        "freqtrade.exchange.exchange_ws.ExchangeWS._create_ws_exchange_pool",
+        return_value={"127.0.0.2": ccxt_object, "127.0.0.3": ccxt_object},
+    )
+
+    no_pool = ExchangeWS({"exchange": {}}, ccxt_object)
+    one_ip = ExchangeWS({"exchange": {"websocket_ip_pool": ["127.0.0.2"]}}, ccxt_object)
+    two_ips = ExchangeWS(
+        {"exchange": {"websocket_ip_pool": ["127.0.0.2", "127.0.0.3"]}},
+        ccxt_object,
+    )
+    try:
+        assert no_pool.ws_scheduled_refresh_enabled is False
+        assert one_ip.ws_scheduled_refresh_enabled is False
+        assert two_ips.ws_scheduled_refresh_enabled is True
+    finally:
+        no_pool.cleanup()
+        one_ip.cleanup()
+        two_ips.cleanup()
+
+
+def test_ws_scheduled_refresh_explicit_false_overrides_multi_ip_pool(mocker):
+    ccxt_object = MagicMock()
+    mocker.patch("freqtrade.exchange.exchange_ws.ExchangeWS._start_forever", MagicMock())
+    mocker.patch(
+        "freqtrade.exchange.exchange_ws.ExchangeWS._create_ws_exchange_pool",
+        return_value={"127.0.0.2": ccxt_object, "127.0.0.3": ccxt_object},
+    )
+
+    exchange_ws = ExchangeWS(
+        {
+            "exchange": {
+                "websocket_ip_pool": ["127.0.0.2", "127.0.0.3"],
+                "ws_scheduled_refresh_enabled": False,
+            }
+        },
+        ccxt_object,
+    )
+    try:
+        assert exchange_ws.ws_scheduled_refresh_enabled is False
+    finally:
+        exchange_ws.cleanup()
+
+
+def test_ws_connection_reset_respects_scheduled_refresh_flag():
+    disabled_ws = SimpleNamespace(
+        ws_scheduled_refresh_enabled=False,
+        reset_connections=MagicMock(),
+    )
+    enabled_ws = SimpleNamespace(
+        ws_scheduled_refresh_enabled=True,
+        reset_connections=MagicMock(),
+    )
+
+    Exchange.ws_connection_reset(SimpleNamespace(_exchange_ws=disabled_ws))
+    Exchange.ws_connection_reset(SimpleNamespace(_exchange_ws=enabled_ws))
+
+    disabled_ws.reset_connections.assert_not_called()
+    enabled_ws.reset_connections.assert_called_once()
+
+
+async def test_stats_monitor_skips_refresh_when_scheduled_refresh_disabled(mocker):
+    ccxt_object = MagicMock()
+    mocker.patch("freqtrade.exchange.exchange_ws.ExchangeWS._start_forever", MagicMock())
+    mocker.patch(
+        "freqtrade.exchange.exchange_ws.ExchangeWS._create_ws_exchange_pool",
+        return_value={"127.0.0.2": ccxt_object, "127.0.0.3": ccxt_object},
+    )
+    mocker.patch("freqtrade.exchange.exchange_ws.asyncio.sleep", AsyncMock())
+    mocker.patch("freqtrade.exchange.exchange_ws.time.time", return_value=20 * 60)
+
+    exchange_ws = ExchangeWS(
+        {
+            "exchange": {
+                "websocket_ip_pool": ["127.0.0.2", "127.0.0.3"],
+                "ws_scheduled_refresh_enabled": False,
+            }
+        },
+        ccxt_object,
+    )
+    exchange_ws._refresh_all_connections = AsyncMock()
+    exchange_ws._try_recover_failed_ips = AsyncMock(side_effect=asyncio.CancelledError)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await exchange_ws._stats_monitor()
+    finally:
+        exchange_ws.cleanup()
+
+    exchange_ws._refresh_all_connections.assert_not_called()
+
+
+async def test_ip_failure_dedupe_counts_one_disconnect_once(mocker):
+    config = {
+        "exchange": {
+            "websocket_ip_pool": ["127.0.0.2"],
+            "ws_failure_dedupe_window": 2.0,
+            "ws_failure_threshold": 10,
+        }
+    }
+    ccxt_object = MagicMock()
+    mocker.patch("freqtrade.exchange.exchange_ws.ExchangeWS._start_forever", MagicMock())
+    mocker.patch(
+        "freqtrade.exchange.exchange_ws.ExchangeWS._create_ws_exchange_pool",
+        return_value={"127.0.0.2": ccxt_object},
+    )
+
+    exchange_ws = ExchangeWS(config, ccxt_object)
+    time_mock = mocker.patch(
+        "freqtrade.exchange.exchange_ws.time.time",
+        side_effect=[100.0, 101.0, 104.0, 105.0],
+    )
+    try:
+        await exchange_ws._handle_ip_failure("127.0.0.2", "BTC/USDT:USDT")
+        await exchange_ws._handle_ip_failure("127.0.0.2", "BTC/USDT:USDT")
+        await exchange_ws._handle_ip_failure("127.0.0.2", "BTC/USDT:USDT")
+        await exchange_ws._handle_ip_failure("127.0.0.2", "ETH/USDT:USDT")
+    finally:
+        exchange_ws.cleanup()
+
+    assert exchange_ws._ip_stats["127.0.0.2"]["failures"] == 3
+    assert exchange_ws._ip_consecutive_failures["127.0.0.2"] == 3
+    assert time_mock.call_count == 4
 
 
 async def test_exchangews_get_ohlcv(mocker, caplog):

@@ -52,6 +52,10 @@ class ExchangeWS:
             exchange_config if exchange_config is not None else config.get("exchange", {})
         )
         self._ip_pool: list[str] = exchange_config.get("websocket_ip_pool", [])
+        self._ws_scheduled_refresh_enabled: bool = exchange_config.get(
+            "ws_scheduled_refresh_enabled",
+            len(self._ip_pool) > 1,
+        )
 
         # State tracking for IP distribution
         self._ip_states: dict[str, IPState] = {}
@@ -61,6 +65,8 @@ class ExchangeWS:
         # IP failure tracking for recovery mechanism
         self._ip_failure_time: dict[str, float] = {}  # When IP was marked FAILED
         self._ip_consecutive_failures: dict[str, int] = {}  # Consecutive failure count per IP
+        self._last_ip_failure_event: dict[tuple[str, str], float] = {}
+        self._failure_dedupe_window: float = exchange_config.get("ws_failure_dedupe_window", 2.0)
 
         # Exponential backoff tracking per IP for reconnection
         self._ip_backoff_delay: dict[str, float] = {}  # Current backoff delay per IP
@@ -73,6 +79,10 @@ class ExchangeWS:
 
         # Track last refresh time to avoid duplicate refreshes
         self._last_periodic_refresh: float = 0
+
+        # Flag set during _refresh_all_connections to suppress failure handling
+        # while connections are intentionally being closed and recreated.
+        self._refresh_in_progress: bool = False
 
         # Data freshness threshold for checking stale data
         self._data_freshness_threshold_ms: int = (
@@ -157,6 +167,10 @@ class ExchangeWS:
 
         # Track last hourly log time
         self._last_hourly_log: float = 0
+
+    @property
+    def ws_scheduled_refresh_enabled(self) -> bool:
+        return self._ws_scheduled_refresh_enabled
 
     @staticmethod
     def _patch_ccxt_sync_local_addr(exchange, ip: str) -> None:
@@ -476,7 +490,7 @@ class ExchangeWS:
             # NOTE: Only refresh at :20, NOT :50. The :50 refresh is too close to the :00
             # candle boundary - connections take 25-60s to get first message, leaving
             # insufficient buffer time. The :20 refresh provides 40 minutes of margin.
-            if current_minute == 20:
+            if self._ws_scheduled_refresh_enabled and current_minute == 20:
                 # Only refresh if we haven't refreshed in the last 30 minutes
                 if current_time - self._last_periodic_refresh > 1800:
                     await self._refresh_all_connections()
@@ -801,17 +815,24 @@ class ExchangeWS:
         current_minute = int(time.time() // 60) % 60
         logger.info(f"[WS-REFRESH] Starting periodic refresh at :{current_minute:02d}")
 
-        # Close all existing connections
-        for ip, ws_exchange in self._ws_exchanges.items():
-            try:
-                await ws_exchange.close()
-                ws_exchange.ohlcvs.clear()
-                logger.debug(f"[WS-REFRESH] Closed connection for IP {ip}")
-            except Exception as e:
-                logger.warning(f"[WS-REFRESH] Error closing {ip}: {e}")
+        # Suppress failure handling while we intentionally close and recreate connections.
+        # Without this, the NetworkError raised in watcher tasks during close accumulates
+        # into _ip_consecutive_failures and marks the IP FAILED before state reset runs.
+        self._refresh_in_progress = True
+        try:
+            # Close all existing connections
+            for ip, ws_exchange in self._ws_exchanges.items():
+                try:
+                    await ws_exchange.close()
+                    ws_exchange.ohlcvs.clear()
+                    logger.debug(f"[WS-REFRESH] Closed connection for IP {ip}")
+                except Exception as e:
+                    logger.warning(f"[WS-REFRESH] Error closing {ip}: {e}")
 
-        # Recreate exchange instances
-        self._ws_exchanges = self._create_ws_exchange_pool(self._ccxt_object)
+            # Recreate exchange instances
+            self._ws_exchanges = self._create_ws_exchange_pool(self._ccxt_object)
+        finally:
+            self._refresh_in_progress = False
 
         # Clear pair assignments - will be re-assigned on next request
         self._pair_ip_assignment.clear()
@@ -915,6 +936,30 @@ class ExchangeWS:
         Uses threshold (3 consecutive failures) before marking as FAILED.
         Failed IPs can recover after 5 minute cooldown.
         """
+        # Ignore failures triggered by intentional connection closure during refresh
+        if self._refresh_in_progress:
+            return
+
+        # Pool exhaustion can temporarily route watches through the default exchange.
+        # That exchange is not part of the configured pool and has no failure state
+        # to mark, so account for the event without crashing the background task.
+        if failed_ip not in self._ip_stats:
+            logger.warning(
+                f"[IP-FAILURE] Ignoring failure for untracked fallback IP {failed_ip} "
+                f"on {pair}"
+            )
+            return
+
+        failure_key = (failed_ip, pair)
+        now = time.time()
+        last_failure = self._last_ip_failure_event.get(failure_key)
+        if last_failure is not None and now - last_failure < self._failure_dedupe_window:
+            logger.debug(
+                f"[IP-FAILURE] Deduped repeated failure for IP {failed_ip} on {pair}"
+            )
+            return
+        self._last_ip_failure_event[failure_key] = now
+
         # Increment consecutive failure count
         self._ip_consecutive_failures[failed_ip] = (
             self._ip_consecutive_failures.get(failed_ip, 0) + 1
@@ -1283,11 +1328,6 @@ class ExchangeWS:
             # DIAGNOSTIC: Log connection errors with full context
             error_time = datetime.now().strftime("%H:%M:%S.%f")
             current_minute = int(time.time() // 60) % 60
-
-            # Track failure statistics
-            if assigned_ip in self._ip_stats:
-                self._ip_stats[assigned_ip]["failures"] += 1
-                self._ip_stats[assigned_ip]["last_failure"] = str(e)[:100]
 
             # Increase exponential backoff: 1s -> 2s -> 4s -> 8s -> max (configurable, default 30s)
             current_backoff = self._ip_backoff_delay.get(assigned_ip, 0.5)
