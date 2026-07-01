@@ -985,6 +985,13 @@ CONF_SCHEMA = {
                     "type": "boolean",
                     "default": True,
                 },
+                "ws_scheduled_refresh_enabled": {
+                    "description": (
+                        "Enable scheduled WebSocket connection refresh/reset. "
+                        "Reactive reconnect after exchange-side disconnects remains enabled."
+                    ),
+                    "type": "boolean",
+                },
                 "unknown_fee_rate": {
                     "description": "Fee rate for unknown markets.",
                     "type": "number",

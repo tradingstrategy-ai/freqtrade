@@ -692,7 +692,7 @@ class Exchange:
         """
         called at regular intervals to reset the websocket connection
         """
-        if self._exchange_ws:
+        if self._exchange_ws and self._exchange_ws.ws_scheduled_refresh_enabled:
             self._exchange_ws.reset_connections()
 
     async def _api_reload_markets(self, reload: bool = False) -> None:
