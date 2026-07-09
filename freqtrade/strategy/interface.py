@@ -386,6 +386,25 @@ class IStrategy(ABC, HyperStrategyMixin):
         """
         return True
 
+    def rank_entry_pairs(
+        self,
+        pairs_with_signals: list[tuple[str, str, str]],
+        current_time: datetime,
+    ) -> list[tuple[str, str, str]]:
+        """
+        Reorder candidate entries before trade creation in backtesting.
+        Called once per main candle with all (pair, direction, enter_tag) tuples
+        that have entry signals. Return them in the desired execution order.
+        When trade slots are limited, higher-ranked (earlier) entries are preferred.
+
+        Default: no reordering (preserve pairlist order).
+
+        :param pairs_with_signals: List of (pair, direction, enter_tag) tuples
+        :param current_time: Current candle datetime
+        :return: Reordered list of (pair, direction, enter_tag) tuples
+        """
+        return pairs_with_signals
+
     def confirm_trade_exit(
         self,
         pair: str,
