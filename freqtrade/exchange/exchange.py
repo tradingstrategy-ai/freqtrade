@@ -690,9 +690,13 @@ class Exchange:
 
     def ws_connection_reset(self):
         """
-        called at regular intervals to reset the websocket connection
+        called daily to reset the websocket connection and avoid the
+        "connection-reset" errors that happen after ~9 days of uptime.
+        Deliberately NOT gated on ws_scheduled_refresh_enabled: that flag only
+        controls the buggy :20 periodic refresh, and disabling it must not
+        also disable this unrelated daily staleness reset.
         """
-        if self._exchange_ws and self._exchange_ws.ws_scheduled_refresh_enabled:
+        if self._exchange_ws:
             self._exchange_ws.reset_connections()
 
     async def _api_reload_markets(self, reload: bool = False) -> None:
