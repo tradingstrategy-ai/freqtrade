@@ -987,8 +987,11 @@ CONF_SCHEMA = {
                 },
                 "ws_scheduled_refresh_enabled": {
                     "description": (
-                        "Enable scheduled WebSocket connection refresh/reset. "
-                        "Reactive reconnect after exchange-side disconnects remains enabled."
+                        "Enable the periodic (:20 past the hour) WebSocket connection "
+                        "refresh. Does not affect the daily connection reset (avoids "
+                        "connection-reset errors after ~9 days) or reactive reconnect "
+                        "after exchange-side disconnects, both of which remain enabled "
+                        "regardless of this setting."
                     ),
                     "type": "boolean",
                 },

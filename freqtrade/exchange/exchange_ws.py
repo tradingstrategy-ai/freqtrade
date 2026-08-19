@@ -1034,6 +1034,11 @@ class ExchangeWS:
         self.__cleanup_called = False
 
     async def _cleanup_async(self) -> None:
+        # Suppress failure handling while we intentionally close connections here too —
+        # same race as _refresh_all_connections: watcher tasks catch the close as a
+        # NetworkError and would otherwise mark healthy IPs FAILED. See that method's
+        # docstring for the full race description.
+        self._refresh_in_progress = True
         try:
             # Close all WebSocket exchanges
             for ip, ws_exchange in self._ws_exchanges.items():
@@ -1051,6 +1056,7 @@ class ExchangeWS:
         except Exception:
             logger.exception("Exception in _cleanup_async")
         finally:
+            self._refresh_in_progress = False
             self.__cleanup_called = True
 
     def _pop_history(self, paircomb: PairWithTimeframe) -> None:
