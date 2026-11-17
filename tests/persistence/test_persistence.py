@@ -1932,6 +1932,25 @@ def test_get_overall_performance(fee):
 
 
 @pytest.mark.usefixtures("init_persistence")
+def test_performance_excludes_closed_trades_without_profit(fee):
+    """Performance endpoints omit force-closed trades with unknown realized PnL."""
+    create_mock_trades(fee, False)
+    closed = Trade.get_trades([Trade.is_open.is_(False)]).all()
+    assert len(closed) > 1
+    before = sum(row["count"] for row in Trade.get_overall_performance())
+
+    unknown = closed[0]
+    unknown.close_profit = None
+    unknown.close_profit_abs = None
+    unknown.exit_reason = "force_exit_without_profit"
+    Trade.session.commit()
+
+    assert sum(row["count"] for row in Trade.get_overall_performance()) == before - 1
+    assert all(row["exit_reason"] != "force_exit_without_profit" for row in Trade.get_exit_reason_performance(None))
+    assert all("force_exit_without_profit" not in row["mix_tag"] for row in Trade.get_mix_tag_performance(None))
+
+
+@pytest.mark.usefixtures("init_persistence")
 @pytest.mark.parametrize(
     "is_short,pair,profit",
     [

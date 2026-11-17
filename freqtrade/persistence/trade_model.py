@@ -1948,6 +1948,9 @@ class Trade(ModelBase, LocalTrade):
         NOTE: Not supported in Backtesting.
         """
         columns_coal = [func.coalesce(c, fallback).label(c.name) for c in columns]
+        # Force-closed trades can lack realized PnL. Exclude them from the
+        # cost basis, numerator, and count until their PnL is known.
+        performance_filters = [*filters, Trade.close_profit_abs.is_not(None)]
         pair_costs = (
             select(
                 *columns_coal,
@@ -1961,7 +1964,7 @@ class Trade(ModelBase, LocalTrade):
             )
             .join(Order, Trade.id == Order.ft_trade_id)
             .filter(
-                *filters,
+                *performance_filters,
                 Order.ft_order_side == case((Trade.is_short.is_(True), "sell"), else_="buy"),
                 Order.filled > 0,
             )
@@ -1974,7 +1977,7 @@ class Trade(ModelBase, LocalTrade):
                 func.sum(Trade.close_profit_abs).label("profit_sum_abs"),
                 func.count(*columns_coal).label("count"),
             )
-            .filter(*filters)
+            .filter(*performance_filters)
             .group_by(*columns_coal)
             .cte("trades_grouped")
         )
@@ -2075,7 +2078,11 @@ class Trade(ModelBase, LocalTrade):
         NOTE: Not supported in Backtesting.
         """
 
-        filters: list = [Trade.is_open.is_(False)]
+        filters: list = [
+            Trade.is_open.is_(False),
+            Trade.close_profit.is_not(None),
+            Trade.close_profit_abs.is_not(None),
+        ]
         if pair is not None:
             filters.append(Trade.pair == pair)
         mix_tag_perf = Trade.session.execute(
